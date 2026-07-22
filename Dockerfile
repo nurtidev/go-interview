@@ -21,9 +21,12 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/server ./cmd/server
 
 # ---------------------------------------------------------------------------
-# Stage 3: minimal runtime image
+# Stage 3: runtime image
+# Не distroless: раннеру лайвкодинга нужен Go-тулчейн (`go test`) в рантайме.
+# До появления полноценной песочницы (nsjail/Judge0) раннер защищён только
+# аутентификацией, лимитами кода/вывода, таймаутом и GOPROXY=off.
 # ---------------------------------------------------------------------------
-FROM gcr.io/distroless/base-debian12 AS final
+FROM golang:1.24 AS final
 WORKDIR /app
 
 COPY --from=build /out/server /app/server
