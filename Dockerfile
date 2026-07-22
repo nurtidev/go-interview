@@ -39,6 +39,6 @@ ENV PORT=8080 \
     WEB_DIST=/app/web/dist
 
 EXPOSE 8080
-VOLUME ["/data"]
 
+# Persistent-хранилище: смонтируйте volume в /data (Railway Volumes / docker run -v)
 ENTRYPOINT ["/app/server"]
