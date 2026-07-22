@@ -79,7 +79,7 @@ const FAQ_ITEMS = [
 
 // [ОТКЛ №2] ПЛЕЙСХОЛДЕРЫ — заменить реальными отзывами перед публикацией.
 // Инициалы/должности абстрактные: без фамилий и компаний.
-const SHOW_TESTIMONIALS = true
+const SHOW_TESTIMONIALS = false
 const PLACEHOLDER_TESTIMONIALS = [
   {
     initials: 'ДК',
