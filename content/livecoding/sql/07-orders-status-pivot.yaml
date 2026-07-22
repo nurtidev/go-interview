@@ -1,0 +1,88 @@
+slug: orders-status-pivot
+kind: sql
+title: "Статусы заказов по колонкам (условная агрегация)"
+difficulty: senior
+tags: [conditional-aggregation, case-when, pivot]
+statement_md: |
+  Есть таблица заказов `orders` со столбцами `id`, `customer`, `status`
+  (`new`, `paid`, `shipped`, `cancelled`) и `amount`. Постройте сводку по каждому
+  покупателю: сколько у него заказов в каждом статусе — **разложите статусы по
+  отдельным колонкам** (pivot).
+
+  Верните столбцы: `customer`, `new_count`, `paid_count`, `shipped_count`,
+  `cancelled_count`, `total_orders`. Отсортируйте по `customer` по возрастанию.
+starter_code: |
+  -- Верните по строке на покупателя: количество заказов в каждом статусе отдельными колонками + всего.
+  SELECT ...
+hints:
+  - "Pivot в SQL без спец-синтаксиса делается через условную агрегацию: внутрь агрегатной функции кладут CASE WHEN. Группировать нужно по покупателю."
+  - "Для каждой колонки-статуса считаем: SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END). CASE превращает нужный статус в 1, остальные в 0, а SUM складывает — получается счётчик по статусу."
+  - "Сгруппируйте по customer, для каждого статуса заведите свой SUM(CASE ...), а total_orders посчитайте как COUNT(*). Отсортируйте по customer."
+solution_md: |
+  ### Идея
+
+  Развернуть строки в колонки (pivot) в стандартном SQL можно **условной
+  агрегацией**: внутрь агрегата помещают `CASE WHEN`. Выражение
+  `SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END)` для каждой группы считает,
+  сколько строк попало в статус `paid`: `CASE` даёт 1 для нужного статуса и 0 для
+  остальных, а `SUM` складывает единицы. Заводим по такому выражению на каждый
+  статус и группируем по `customer`; `total_orders` — это просто `COUNT(*)` по
+  группе.
+
+  Вместо `SUM(CASE ...)` в SQLite/PostgreSQL можно писать
+  `COUNT(CASE WHEN ... THEN 1 END)` (без `ELSE`: `COUNT` не считает `NULL`) —
+  результат тот же.
+
+  ### Эталонный запрос
+
+  ```sql
+  SELECT
+    customer,
+    SUM(CASE WHEN status = 'new'       THEN 1 ELSE 0 END) AS new_count,
+    SUM(CASE WHEN status = 'paid'      THEN 1 ELSE 0 END) AS paid_count,
+    SUM(CASE WHEN status = 'shipped'   THEN 1 ELSE 0 END) AS shipped_count,
+    SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
+    COUNT(*)                                              AS total_orders
+  FROM orders
+  GROUP BY customer
+  ORDER BY customer;
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Ставить условие по статусу в `WHERE` — тогда останется только один статус, и
+    развернуть все сразу не выйдет; фильтр по статусу должен жить **внутри** агрегата.
+  - Забыть `ELSE 0` в `SUM(CASE ...)`: при отсутствии совпадений `SUM` вернёт
+    `NULL` вместо 0 (в SQLite это заметно, когда у покупателя нет заказов в статусе).
+    Вариант с `COUNT(CASE WHEN ... THEN 1 END)` этой ловушки лишён.
+  - Группировать не по тому ключу или забыть `GROUP BY customer`.
+  - Считать `total_orders` как сумму колонок вручную вместо `COUNT(*)` — при новых
+    статусах легко ошибиться; `COUNT(*)` надёжнее.
+schema_sql: |
+  CREATE TABLE orders (
+    id       INTEGER PRIMARY KEY,
+    customer TEXT NOT NULL,
+    status   TEXT NOT NULL,
+    amount   INTEGER NOT NULL
+  );
+seed_sql: |
+  INSERT INTO orders (id, customer, status, amount) VALUES
+    (1,  'Alice', 'new',       100),
+    (2,  'Alice', 'paid',      200),
+    (3,  'Alice', 'paid',      150),
+    (4,  'Alice', 'shipped',   300),
+    (5,  'Bob',   'new',       50),
+    (6,  'Bob',   'new',       80),
+    (7,  'Bob',   'shipped',   400),
+    (8,  'Bob',   'cancelled', 70),
+    (9,  'Carol', 'paid',      250),
+    (10, 'Carol', 'shipped',   120),
+    (11, 'Carol', 'cancelled', 90),
+    (12, 'Carol', 'new',       60);
+expected:
+  columns: [customer, new_count, paid_count, shipped_count, cancelled_count, total_orders]
+  rows:
+    - ["Alice", "1", "2", "1", "0", "4"]
+    - ["Bob", "2", "0", "1", "1", "4"]
+    - ["Carol", "1", "1", "1", "1", "4"]
+  order_matters: true

@@ -1,0 +1,24 @@
+slug: gmp-scheduler
+topic: go-internals
+title: "Планировщик Go: G, M, P"
+minutes: 8
+tags: [runtime, scheduler]
+body_md: |
+  ## G, M, P
+
+  Планировщик Go оперирует тремя сущностями:
+
+  <svg width="240" height="80" viewBox="0 0 240 80">
+    <rect x="10" y="10" width="60" height="30" fill="#4f8" />
+    <text x="20" y="30">G</text>
+    <rect x="90" y="10" width="60" height="30" fill="#48f" />
+    <text x="100" y="30">M</text>
+    <rect x="170" y="10" width="60" height="30" fill="#f84" />
+    <text x="180" y="30">P</text>
+  </svg>
+
+  - **G** (goroutine) — единица работы.
+  - **M** (machine) — поток ОС.
+  - **P** (processor) — контекст планирования, ограничивающий параллелизм.
+related_questions: [goroutine-scheduler-gmp, unknown-question-slug]
+related_tasks: [sum-slice, unknown-task-slug]

@@ -1,0 +1,146 @@
+slug: rate-limiter-token-bucket
+section: concurrency
+title: "Rate limiter на Go: token bucket и x/time/rate"
+tags: [rate-limit, patterns]
+difficulty: senior
+question_md: |
+  Как реализовать rate limiter на Go? Покажите простой token bucket на
+  `time.Ticker` и промышленный вариант на `golang.org/x/time/rate`. В чём разница
+  token bucket и leaky bucket, как сделать лимиты per-key и что делать в
+  распределённом случае?
+answer_levels:
+  - level: middle
+    text_md: |
+      Rate limiter ограничивает частоту операций. Token bucket: в «ведро»
+      добавляются токены с постоянной скоростью до ёмкости `burst`, каждая
+      операция забирает токен; нет токена — ждём или отказываем. Это допускает
+      кратковременные всплески до `burst`. В стандартной экосистеме используют
+      `golang.org/x/time/rate.Limiter`: `Allow()` — неблокирующая проверка,
+      `Wait(ctx)` — блокирует до токена или отмены, `Reserve()` — сообщает,
+      сколько ждать. Скорость задаётся как `rate.Limit` (токенов в секунду) или
+      удобным `rate.Every(interval)`, второй аргумент — `burst`.
+  - level: senior
+    text_md: |
+      Простой token bucket на `time.Ticker` пополняет буферизованный канал
+      токенов; операция забирает токен из канала (`Allow` — неблокирующе через
+      `select`/`default`):
+
+      ```go
+      package main
+
+      import "time"
+
+      type TokenBucket struct {
+          tokens chan struct{}
+          stop   chan struct{}
+      }
+
+      func NewTokenBucket(rps int, burst int) *TokenBucket {
+          tb := &TokenBucket{
+              tokens: make(chan struct{}, burst),
+              stop:   make(chan struct{}),
+          }
+          for i := 0; i < burst; i++ { // старт с полного ведра
+              tb.tokens <- struct{}{}
+          }
+          go func() {
+              t := time.NewTicker(time.Second / time.Duration(rps))
+              defer t.Stop()
+              for {
+                  select {
+                  case <-t.C:
+                      select { // не блокируемся, если ведро полное
+                      case tb.tokens <- struct{}{}:
+                      default:
+                      }
+                  case <-tb.stop:
+                      return
+                  }
+              }
+          }()
+          return tb
+      }
+
+      func (tb *TokenBucket) Allow() bool {
+          select {
+          case <-tb.tokens:
+              return true
+          default:
+              return false
+          }
+      }
+
+      func (tb *TokenBucket) Close() { close(tb.stop) }
+
+      func main() {
+          tb := NewTokenBucket(10, 5)
+          defer tb.Close()
+          for i := 0; i < 3; i++ {
+              _ = tb.Allow()
+              time.Sleep(50 * time.Millisecond)
+          }
+      }
+      ```
+
+      В проде берут `x/time/rate` — там дробные токены, точный расчёт по времени
+      (без тикера) и `Reserve` с компенсацией:
+
+      ```go
+      import (
+          "context"
+          "golang.org/x/time/rate"
+      )
+
+      // 100 запросов в секунду, всплеск до 20
+      lim := rate.NewLimiter(rate.Limit(100), 20)
+
+      // неблокирующе
+      if lim.Allow() { /* обработать */ }
+
+      // блокирующе с учётом отмены
+      func do(ctx context.Context, lim *rate.Limiter) error {
+          if err := lim.Wait(ctx); err != nil {
+              return err // ctx отменён/дедлайн
+          }
+          return handle()
+      }
+      ```
+
+      Token bucket допускает всплеск до `burst`, затем сглаживает; leaky bucket
+      (очередь, «утекающая» с постоянной скоростью) выдаёт строго ровный поток на
+      выходе и не пропускает всплесков. Ловушка тикера: минимальный период тикера
+      ограничен, `time.Second/rps` при больших `rps` теряет точность и создаёт
+      дрожание; `x/time/rate` считает по `time.Now()` и этим не страдает.
+      Per-key лимиты — `map[string]*rate.Limiter` под `sync.Mutex` с фоновой
+      чисткой давно не используемых ключей (иначе утечка памяти).
+  - level: deep
+    text_md: |
+      Внутри `rate.Limiter` не хранит токены в канале — он держит момент времени,
+      к которому «ведро» станет полным (поле связано с последним резервом), и
+      считает доступные токены как функцию прошедшего времени: дробный баланс без
+      тикера и без фоновой горутины, что дёшево по памяти и точно. `Reserve`
+      возвращает `Reservation` с `Delay()`; если операция не состоялась, её можно
+      вернуть через `r.Cancel()`, чтобы не «сжечь» токен. `Allow` — это
+      `ReserveN(now, 1)` с проверкой нулевой задержки. `SetLimit`/`SetBurst`
+      позволяют менять параметры на лету (например, из конфигурации), пересчитывая
+      баланс на текущий момент.
+
+      Per-key в большом масштабе: `map + Mutex` становится точкой контеншена;
+      варианты — шардировать map по хэшу ключа, использовать `sync.Map` при
+      преимущественно непересекающихся ключах, а для вытеснения — LRU/TTL-кэш
+      лимитеров (`hashicorp/golang-lru` с политикой истечения), иначе на большом
+      кардинальном множестве ключей память течёт.
+
+      Распределённый rate limit: локальный лимитер на инстанс не даёт глобального
+      потолка при горизонтальном масштабировании. Классика — Redis: атомарный
+      Lua-скрипт реализует token/leaky bucket или sliding window log/counter
+      (`INCR`+`EXPIRE`, либо `redis-cell` c командой `CL.THROTTLE`,
+      реализующей GCRA). GCRA (generic cell rate algorithm) — эквивалент token
+      bucket без хранения счётчика тикера, удобен для распределёнки, так как
+      состояние — это один timestamp. Компромисс: сетевой round-trip на каждую
+      проверку против точности; часто ставят двухуровневую схему — грубый
+      локальный лимитер плюс точный распределённый на критичных операциях.
+follow_ups:
+  - "Зачем нужен Reservation.Cancel и когда токен возвращается в ведро?"
+  - "Как реализовать sliding window rate limit в Redis и чем он лучше фиксированного окна?"
+  - "Что такое GCRA и почему он удобен для распределённого лимитирования?"

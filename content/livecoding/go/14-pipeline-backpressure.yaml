@@ -1,0 +1,281 @@
+slug: pipeline-backpressure
+kind: go
+title: "Pipeline с backpressure"
+difficulty: staff
+tags: [pipeline, backpressure, channels, context]
+statement_md: |
+  Реализуйте двухэтапный конвейер: этап-продюсер трансформирует входные значения,
+  этап-потребитель их принимает. Если потребитель медленный, продюсер должен
+  замедлиться (backpressure), а не копить результаты в неограниченной памяти.
+
+  ```go
+  type Stage func(ctx context.Context, in int) (int, error)
+
+  func RunPipeline(ctx context.Context, inputs []int, buffer int,
+      transform Stage, consume func(int) error) error
+  ```
+
+  Требования:
+
+  - Каждый вход проходит `transform`, результат передаётся в `consume` в исходном
+    порядке.
+  - Между этапами — канал ёмкости `buffer`: при медленном `consume` продюсер
+    блокируется на отправке (backpressure), а не уходит в отрыв.
+  - Первая же ошибка `transform` или `consume` останавливает конвейер и
+    возвращается наружу; при отмене `ctx` возвращается его ошибка.
+  - Этапы работают конкурентно; горутины не текут (проверяется под `-race`).
+starter_code: |
+  package main
+
+  import "context"
+
+  // Stage — этап обработки: преобразует значение, может вернуть ошибку.
+  type Stage func(ctx context.Context, in int) (int, error)
+
+  // RunPipeline прогоняет inputs через transform (этап-продюсер) и передаёт
+  // результаты в consume (этап-потребитель) в исходном порядке. Канал ёмкости
+  // buffer между этапами создаёт backpressure: медленный consume тормозит
+  // продюсера. Возвращает первую ошибку этапа или ошибку отмены ctx.
+  func RunPipeline(ctx context.Context, inputs []int, buffer int, transform Stage, consume func(int) error) error {
+      // TODO
+      return nil
+  }
+hints:
+  - "Backpressure — это просто ограниченный буфер канала между этапами. Продюсер шлёт результат в chan int ёмкости buffer; когда он полон, отправка блокирует продюсера, пока потребитель не разгребёт."
+  - "И продюсер, и потребитель должны слушать ctx.Done() в select, иначе при ошибке/отмене один из них навсегда зависнет на канале. Продюсер закрывает выходной канал в defer — это сигнал потребителю завершиться."
+  - "Первую ошибку фиксируйте один раз (под sync.Mutex) и вызывайте cancel() — это разбудит второй этап через ctx.Done(). Дождитесь обеих горутин sync.WaitGroup, потом верните ошибку или ctx.Err()."
+solution_md: |
+  ### Идея
+
+  Конвейер — две горутины, соединённые каналом ёмкости `buffer`. Продюсер
+  читает `inputs` по порядку, применяет `transform` и шлёт результат в канал;
+  потребитель читает канал и зовёт `consume`. Порядок сохраняется, потому что в
+  каждом этапе ровно одна горутина.
+
+  Backpressure возникает естественно: когда потребитель не успевает, канал
+  заполняется, и отправка в него блокирует продюсера — память не растёт. Размер
+  буфера регулирует «жёсткость» обратного давления (`0` — самое жёсткое).
+
+  Ошибки и отмену обрабатываем через производный `context`: первая ошибка любого
+  этапа фиксируется один раз и вызывает `cancel()`, что будит второй этап через
+  `ctx.Done()` в `select`. Обе горутины слушают `ctx.Done()`, поэтому никто не
+  зависает на канале; продюсер закрывает канал в `defer`, сигналя потребителю.
+  `sync.WaitGroup` гарантирует, что перед возвратом обе горутины завершились —
+  горутины не текут.
+
+  ### Эталонное решение
+
+  ```go
+  import (
+      "context"
+      "sync"
+  )
+
+  type Stage func(ctx context.Context, in int) (int, error)
+
+  func RunPipeline(ctx context.Context, inputs []int, buffer int, transform Stage, consume func(int) error) error {
+      if buffer < 0 {
+          buffer = 0
+      }
+      ctx, cancel := context.WithCancel(ctx)
+      defer cancel()
+
+      ch := make(chan int, buffer)
+
+      var (
+          mu       sync.Mutex
+          firstErr error
+      )
+      fail := func(err error) {
+          if err == nil {
+              return
+          }
+          mu.Lock()
+          if firstErr == nil {
+              firstErr = err
+              cancel()
+          }
+          mu.Unlock()
+      }
+
+      var wg sync.WaitGroup
+      wg.Add(2)
+
+      // Этап-продюсер: читает вход, трансформирует и шлёт дальше.
+      go func() {
+          defer wg.Done()
+          defer close(ch)
+          for _, v := range inputs {
+              select {
+              case <-ctx.Done():
+                  return
+              default:
+              }
+              r, err := transform(ctx, v)
+              if err != nil {
+                  fail(err)
+                  return
+              }
+              select {
+              case ch <- r: // блокируется, когда буфер полон => backpressure
+              case <-ctx.Done():
+                  return
+              }
+          }
+      }()
+
+      // Этап-потребитель.
+      go func() {
+          defer wg.Done()
+          for {
+              select {
+              case v, ok := <-ch:
+                  if !ok {
+                      return
+                  }
+                  if err := consume(v); err != nil {
+                      fail(err)
+                      return
+                  }
+              case <-ctx.Done():
+                  return
+              }
+          }
+      }()
+
+      wg.Wait()
+
+      mu.Lock()
+      defer mu.Unlock()
+      if firstErr != nil {
+          return firstErr
+      }
+      return ctx.Err()
+  }
+  ```
+
+  Сложность: `O(n)` вызовов `transform` и `consume`; память — `O(buffer)`, а не `O(n)`.
+
+  ### Типичные ошибки на интервью
+
+  - Собирать все результаты в слайс, а потом отдавать потребителю — теряется backpressure, память растёт до O(n).
+  - Не слушать ctx.Done() в отправке/приёме — при ошибке одна из горутин навсегда виснет на канале (goroutine leak).
+  - Гонка на переменной первой ошибки — фиксируйте её под мьютексом или через единый канал.
+  - Не дождаться WaitGroup — вернуться, оставив живые горутины.
+time_limit_sec: 18
+race: true
+test_code: |
+  package main
+
+  import (
+      "context"
+      "errors"
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestPipelineOrderAndTransform(t *testing.T) {
+      inputs := make([]int, 20)
+      for i := range inputs {
+          inputs[i] = i
+      }
+      var mu sync.Mutex
+      var got []int
+      err := RunPipeline(context.Background(), inputs, 4,
+          func(ctx context.Context, in int) (int, error) { return in*2 + 1, nil },
+          func(v int) error {
+              mu.Lock()
+              got = append(got, v)
+              mu.Unlock()
+              return nil
+          },
+      )
+      if err != nil {
+          t.Fatalf("err = %v, want nil", err)
+      }
+      if len(got) != len(inputs) {
+          t.Fatalf("consumed %d items, want %d", len(got), len(inputs))
+      }
+      for i := range inputs {
+          if got[i] != inputs[i]*2+1 {
+              t.Fatalf("out[%d] = %d, want %d (order/transform broken)", i, got[i], inputs[i]*2+1)
+          }
+      }
+  }
+
+  func TestPipelineBackpressure(t *testing.T) {
+      const (
+          n      = 200
+          buffer = 1
+      )
+      inputs := make([]int, n)
+      for i := range inputs {
+          inputs[i] = i
+      }
+      var produced, consumed int64
+      err := RunPipeline(context.Background(), inputs, buffer,
+          func(ctx context.Context, in int) (int, error) {
+              atomic.AddInt64(&produced, 1)
+              return in, nil
+          },
+          func(v int) error {
+              atomic.AddInt64(&consumed, 1)
+              time.Sleep(time.Millisecond) // медленный потребитель
+              // При настоящем backpressure продюсер не может убежать далеко вперёд.
+              if diff := atomic.LoadInt64(&produced) - atomic.LoadInt64(&consumed); diff > int64(buffer)+3 {
+                  t.Errorf("in-flight = %d, exceeds buffer %d (no backpressure?)", diff, buffer)
+              }
+              return nil
+          },
+      )
+      if err != nil {
+          t.Fatalf("err = %v, want nil", err)
+      }
+      if consumed != n {
+          t.Fatalf("consumed = %d, want %d", consumed, n)
+      }
+  }
+
+  func TestPipelineTransformError(t *testing.T) {
+      boom := errors.New("bad input")
+      var consumed int64
+      err := RunPipeline(context.Background(), []int{0, 1, 2, 3, 4, 5, 6}, 0,
+          func(ctx context.Context, in int) (int, error) {
+              if in == 3 {
+                  return 0, boom
+              }
+              return in, nil
+          },
+          func(v int) error {
+              atomic.AddInt64(&consumed, 1)
+              return nil
+          },
+      )
+      if !errors.Is(err, boom) {
+          t.Fatalf("err = %v, want boom", err)
+      }
+      if c := atomic.LoadInt64(&consumed); c >= 7 {
+          t.Fatalf("consumed = %d, must stop early on error", c)
+      }
+  }
+
+  func TestPipelineContextCancel(t *testing.T) {
+      ctx, cancel := context.WithCancel(context.Background())
+      inputs := make([]int, 1000)
+      go func() {
+          time.Sleep(5 * time.Millisecond)
+          cancel()
+      }()
+      err := RunPipeline(ctx, inputs, 0,
+          func(ctx context.Context, in int) (int, error) { return in, nil },
+          func(v int) error {
+              time.Sleep(time.Millisecond)
+              return nil
+          },
+      )
+      if !errors.Is(err, context.Canceled) {
+          t.Fatalf("err = %v, want context.Canceled", err)
+      }
+  }

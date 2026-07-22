@@ -1,0 +1,321 @@
+slug: in-memory-pubsub
+kind: go
+title: "In-memory Pub/Sub"
+difficulty: senior
+tags: [pubsub, channels, concurrency]
+statement_md: |
+  Реализуйте внутреннюю шину событий: одни части сервиса публикуют сообщения по
+  топикам, другие подписываются. Медленный подписчик не должен блокировать
+  доставку остальным.
+
+  ```go
+  func NewPubSub(buffer int) *PubSub
+  func (ps *PubSub) Subscribe(topic string) <-chan string
+  func (ps *PubSub) Publish(topic, msg string)
+  func (ps *PubSub) Unsubscribe(topic string, ch <-chan string)
+  func (ps *PubSub) Close()
+  ```
+
+  Требования:
+
+  - `Subscribe` возвращает канал (с буфером `buffer`), в который приходят сообщения
+    топика.
+  - `Publish` рассылает сообщение всем подписчикам топика и **не блокируется** на
+    медленном подписчике: если его буфер полон — сообщение для него дропается.
+  - `Unsubscribe` удаляет подписчика и закрывает его канал.
+  - `Close` закрывает все каналы; после него `Subscribe` отдаёт уже закрытый канал.
+  - Безопасен при конкурентных Publish/Subscribe/Unsubscribe (проверяется под
+    `-race`).
+starter_code: |
+  package main
+
+  // PubSub — in-memory шина событий по топикам.
+  // Медленный подписчик не должен блокировать доставку остальным.
+  type PubSub struct {
+      // TODO: буфер каналов, map topic -> подписчики, флаг закрытия, RWMutex
+  }
+
+  // NewPubSub создаёт шину; buffer — размер буфера канала каждого подписчика.
+  func NewPubSub(buffer int) *PubSub {
+      // TODO
+      return &PubSub{}
+  }
+
+  // Subscribe возвращает канал для приёма сообщений топика.
+  func (ps *PubSub) Subscribe(topic string) <-chan string {
+      // TODO: вернуть небуферизованный канал-заглушку, чтобы тесты не зависали
+      return make(chan string)
+  }
+
+  // Publish рассылает msg всем подписчикам топика, не блокируясь на медленных.
+  func (ps *PubSub) Publish(topic, msg string) {
+      // TODO
+  }
+
+  // Unsubscribe удаляет подписчика и закрывает его канал.
+  func (ps *PubSub) Unsubscribe(topic string, ch <-chan string) {
+      // TODO
+  }
+
+  // Close закрывает все каналы и переводит шину в закрытое состояние.
+  func (ps *PubSub) Close() {
+      // TODO
+  }
+hints:
+  - "Буферизованный канал на подписчика — ключ к «медленный не блокирует остальных». Отправку делайте неблокирующей: select { case ch <- msg: default: }."
+  - "Храните подписчиков как множество каналов на топик (map[string]map[chan string]struct{}) — удаление в Unsubscribe будет O(1), а закрытие канала подаёт подписчику сигнал через v, ok := <-ch."
+  - "Опасность: Publish, отправляющий в канал, и Unsubscribe/Close, закрывающий его, — гонка «send on closed channel». Раз отправка неблокирующая (default), её можно держать под RLock, а закрытие — под Lock: они станут взаимоисключающими."
+solution_md: |
+  ### Идея
+
+  Каждому подписчику выдаём буферизованный канал. `Publish` шлёт неблокирующе
+  (`select` с `default`): если буфер подписчика полон, сообщение для него
+  дропается — так один медленный потребитель не тормозит остальных и саму
+  публикацию.
+
+  Тонкость — гонка «send on closed channel»: `Publish` пишет в канал, а
+  `Unsubscribe`/`Close` его закрывают. Наивный приём «скопировать список
+  подписчиков под `RLock`, а слать после разблокировки» приводит к панике, если
+  между копированием и отправкой канал закрыли. Решение: раз отправка
+  неблокирующая и гарантированно не зависает, держим её под `RLock`, а закрытие —
+  под `Lock`. `RWMutex` делает их взаимоисключающими, и закрыть канал во время
+  отправки невозможно.
+
+  Подписчиков храним как `map[string]map[chan string]struct{}` — удаление за
+  `O(1)`.
+
+  ### Эталонное решение
+
+  ```go
+  import "sync"
+
+  type PubSub struct {
+      mu     sync.RWMutex
+      buffer int
+      subs   map[string]map[chan string]struct{}
+      closed bool
+  }
+
+  func NewPubSub(buffer int) *PubSub {
+      if buffer < 0 {
+          buffer = 0
+      }
+      return &PubSub{
+          buffer: buffer,
+          subs:   make(map[string]map[chan string]struct{}),
+      }
+  }
+
+  func (ps *PubSub) Subscribe(topic string) <-chan string {
+      ch := make(chan string, ps.buffer)
+      ps.mu.Lock()
+      defer ps.mu.Unlock()
+      if ps.closed {
+          close(ch)
+          return ch
+      }
+      if ps.subs[topic] == nil {
+          ps.subs[topic] = make(map[chan string]struct{})
+      }
+      ps.subs[topic][ch] = struct{}{}
+      return ch
+  }
+
+  func (ps *PubSub) Publish(topic, msg string) {
+      // Держим RLock на время неблокирующей отправки: она заведомо не зависнет
+      // (select/default), а write-lock в Unsubscribe/Close, закрывающий каналы,
+      // не сможет выполниться параллельно — так исключаем «send on closed channel».
+      ps.mu.RLock()
+      defer ps.mu.RUnlock()
+      for ch := range ps.subs[topic] {
+          select {
+          case ch <- msg:
+          default: // медленный подписчик: дропаем, не блокируя остальных
+          }
+      }
+  }
+
+  func (ps *PubSub) Unsubscribe(topic string, ch <-chan string) {
+      ps.mu.Lock()
+      defer ps.mu.Unlock()
+      subs := ps.subs[topic]
+      for c := range subs {
+          if (<-chan string)(c) == ch {
+              delete(subs, c)
+              close(c)
+              break
+          }
+      }
+  }
+
+  func (ps *PubSub) Close() {
+      ps.mu.Lock()
+      defer ps.mu.Unlock()
+      if ps.closed {
+          return
+      }
+      ps.closed = true
+      for _, subs := range ps.subs {
+          for c := range subs {
+              close(c)
+          }
+      }
+      ps.subs = make(map[string]map[chan string]struct{})
+  }
+  ```
+
+  Сложность: `Publish` — `O(число подписчиков топика)`; `Subscribe`/`Unsubscribe` — `O(1)`.
+
+  ### Типичные ошибки на интервью
+
+  - Небуферизованный канал подписчика + блокирующая отправка — один медленный подписчик вешает Publish и всех остальных.
+  - Скопировать подписчиков, отпустить лок и слать после — классический «send on closed channel» при конкурентной отписке.
+  - Отправлять блокирующе, забыв про select/default — теряется свойство неблокируемости.
+  - Забыть закрыть канал в Unsubscribe/Close — подписчик не узнает о завершении.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "strconv"
+      "sync"
+      "testing"
+      "time"
+  )
+
+  func mustRecv(t *testing.T, ch <-chan string, d time.Duration) string {
+      t.Helper()
+      select {
+      case v, ok := <-ch:
+          if !ok {
+              t.Fatalf("channel closed, expected a value")
+          }
+          return v
+      case <-time.After(d):
+          t.Fatalf("timeout waiting for message")
+          return ""
+      }
+  }
+
+  func TestPubSubDelivers(t *testing.T) {
+      ps := NewPubSub(8)
+      sub := ps.Subscribe("t")
+      ps.Publish("t", "hi")
+      if got := mustRecv(t, sub, time.Second); got != "hi" {
+          t.Fatalf("got %q, want hi", got)
+      }
+      // Сообщение в другой топик подписчику не приходит.
+      ps.Publish("other", "nope")
+      select {
+      case v := <-sub:
+          t.Fatalf("unexpected message on wrong topic: %q", v)
+      case <-time.After(50 * time.Millisecond):
+      }
+  }
+
+  func TestPubSubMultipleSubscribers(t *testing.T) {
+      ps := NewPubSub(8)
+      a := ps.Subscribe("t")
+      b := ps.Subscribe("t")
+      ps.Publish("t", "x")
+      if got := mustRecv(t, a, time.Second); got != "x" {
+          t.Fatalf("a got %q, want x", got)
+      }
+      if got := mustRecv(t, b, time.Second); got != "x" {
+          t.Fatalf("b got %q, want x", got)
+      }
+  }
+
+  func TestPubSubSlowSubscriberDoesNotBlock(t *testing.T) {
+      ps := NewPubSub(1)
+      slow := ps.Subscribe("t") // никто не читает
+      ps.Publish("t", "a")      // заполнили буфер (size 1)
+
+      done := make(chan struct{})
+      go func() {
+          ps.Publish("t", "b") // буфер полон -> должен дропнуть, не блокируясь
+          close(done)
+      }()
+      select {
+      case <-done:
+      case <-time.After(time.Second):
+          t.Fatalf("Publish blocked on a slow subscriber")
+      }
+
+      if got := mustRecv(t, slow, time.Second); got != "a" {
+          t.Fatalf("got %q, want a", got)
+      }
+  }
+
+  func TestPubSubUnsubscribeCloses(t *testing.T) {
+      ps := NewPubSub(4)
+      sub := ps.Subscribe("t")
+      ps.Unsubscribe("t", sub)
+      select {
+      case _, ok := <-sub:
+          if ok {
+              t.Fatalf("expected channel to be closed after Unsubscribe")
+          }
+      case <-time.After(time.Second):
+          t.Fatalf("channel was not closed after Unsubscribe")
+      }
+      // После отписки сообщения не доставляются (и не паникуем на закрытый канал).
+      ps.Publish("t", "late")
+  }
+
+  func TestPubSubClose(t *testing.T) {
+      ps := NewPubSub(4)
+      sub := ps.Subscribe("t")
+      ps.Close()
+      select {
+      case _, ok := <-sub:
+          if ok {
+              t.Fatalf("expected channel closed after Close")
+          }
+      case <-time.After(time.Second):
+          t.Fatalf("channel not closed after Close")
+      }
+      // Подписка после Close отдаёт уже закрытый канал.
+      after := ps.Subscribe("t")
+      select {
+      case _, ok := <-after:
+          if ok {
+              t.Fatalf("expected closed channel from Subscribe after Close")
+          }
+      case <-time.After(time.Second):
+          t.Fatalf("Subscribe after Close did not return a closed channel")
+      }
+  }
+
+  func TestPubSubConcurrent(t *testing.T) {
+      ps := NewPubSub(16)
+      defer ps.Close()
+      var wg sync.WaitGroup
+      // Публикуем из многих горутин.
+      for g := 0; g < 20; g++ {
+          wg.Add(1)
+          go func(g int) {
+              defer wg.Done()
+              for i := 0; i < 200; i++ {
+                  ps.Publish("t", strconv.Itoa(g))
+              }
+          }(g)
+      }
+      // Параллельно подписываемся/отписываемся и читаем.
+      for g := 0; g < 20; g++ {
+          wg.Add(1)
+          go func() {
+              defer wg.Done()
+              for i := 0; i < 50; i++ {
+                  ch := ps.Subscribe("t")
+                  select {
+                  case <-ch:
+                  case <-time.After(time.Millisecond):
+                  }
+                  ps.Unsubscribe("t", ch)
+              }
+          }()
+      }
+      wg.Wait()
+  }

@@ -1,0 +1,166 @@
+slug: worker-pool-limits
+kind: go
+title: "Worker Pool с ограничением параллелизма"
+difficulty: senior
+tags: [concurrency, goroutines, channels]
+statement_md: |
+  Реализуйте пул воркеров, который выполняет набор задач с ограничением на число
+  одновременно работающих горутин и возвращает результаты **в том же порядке**,
+  что и входные задачи.
+
+  ```go
+  func RunPool(jobs []func() int, workers int) []int
+  ```
+
+  Требования:
+
+  - Каждая задача `jobs[i]` вызывается ровно один раз; её результат кладётся в
+    `result[i]` (порядок результатов совпадает с порядком задач, независимо от
+    того, какой воркер и когда её выполнил).
+  - Одновременно должно работать не более `workers` горутин.
+  - Функция блокируется до завершения всех задач и возвращает слайс длины
+    `len(jobs)`.
+  - Считайте `workers >= 1`; на пустом входе верните пустой (ненулевой длины 0)
+    слайс.
+
+  Решение проверяется под `-race`, поэтому доступ к общим данным должен быть
+  корректным.
+starter_code: |
+  package main
+
+  // RunPool выполняет jobs в пуле из workers горутин и возвращает результаты
+  // в том же порядке, что и входные задачи. Одновременно работает не более
+  // workers горутин.
+  func RunPool(jobs []func() int, workers int) []int {
+      // TODO: пул воркеров с сохранением порядка результатов
+      return make([]int, len(jobs))
+  }
+hints:
+  - "Порядок результатов не зависит от порядка завершения задач, если каждый результат писать сразу в свою ячейку result[i] по индексу задачи."
+  - "Запустите ровно workers горубин-воркеров, читающих из общего канала задач. Передавайте в канал не просто функцию, а пару (индекс, функция), чтобы воркер знал, куда писать результат."
+  - "Разные воркеры пишут в разные индексы одного слайса — это не гонка (память не пересекается). Закройте канал задач после отправки всех задач, а завершения воркеров дождитесь через sync.WaitGroup перед возвратом результата."
+solution_md: |
+  ### Идея
+
+  Порядок результатов сохраняем без сортировки: заранее выделяем слайс `result`
+  длины `len(jobs)` и каждый воркер пишет результат сразу в `result[idx]` —
+  ячейку своей задачи. Разные задачи имеют разные индексы, поэтому воркеры
+  пишут в непересекающиеся ячейки, и гонки данных нет (детектор `-race` это
+  подтверждает).
+
+  Ограничение параллелизма даёт фиксированное число воркеров: запускаем ровно
+  `workers` горутин, которые тянут задачи из общего канала. В канал кладём пару
+  `(индекс, функция)`. После отправки всех задач закрываем канал — воркеры
+  доедают очередь и выходят из `range`. Завершение ждём через `sync.WaitGroup`.
+
+  ### Эталонное решение
+
+  ```go
+  import "sync"
+
+  func RunPool(jobs []func() int, workers int) []int {
+      n := len(jobs)
+      results := make([]int, n)
+      if n == 0 {
+          return results
+      }
+      if workers < 1 {
+          workers = 1
+      }
+      type task struct {
+          idx int
+          fn  func() int
+      }
+      ch := make(chan task)
+      var wg sync.WaitGroup
+      for w := 0; w < workers; w++ {
+          wg.Add(1)
+          go func() {
+              defer wg.Done()
+              for t := range ch {
+                  results[t.idx] = t.fn()
+              }
+          }()
+      }
+      for i, fn := range jobs {
+          ch <- task{idx: i, fn: fn}
+      }
+      close(ch)
+      wg.Wait()
+      return results
+  }
+  ```
+
+  Сложность: параллелизм ограничен `workers`; накладные расходы `O(n)` на
+  диспетчеризацию.
+
+  ### Типичные ошибки на интервью
+
+  - Запускать по горутине на каждую задачу — параллелизм не ограничен `workers`.
+  - Собирать результаты через `append` в общий слайс без синхронизации — гонка данных (ловится `-race`) и потеря порядка.
+  - Собирать результаты в канал и ожидать порядок — порядок завершения недетерминирован.
+  - Забыть `close(ch)` — воркеры навсегда зависают в `range`, дедлок.
+  - Не дождаться `wg.Wait()` — вернуть слайс до записи всех результатов.
+time_limit_sec: 10
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestRunPoolOrder(t *testing.T) {
+      const n = 200
+      jobs := make([]func() int, n)
+      for i := 0; i < n; i++ {
+          i := i
+          jobs[i] = func() int { return i * i }
+      }
+      got := RunPool(jobs, 5)
+      if len(got) != n {
+          t.Fatalf("len(result) = %d, want %d", len(got), n)
+      }
+      for i := 0; i < n; i++ {
+          if got[i] != i*i {
+              t.Fatalf("result[%d] = %d, want %d (порядок должен сохраняться)", i, got[i], i*i)
+          }
+      }
+  }
+
+  func TestRunPoolConcurrencyLimit(t *testing.T) {
+      const (
+          n       = 60
+          workers = 4
+      )
+      var cur, max int64
+      jobs := make([]func() int, n)
+      for i := 0; i < n; i++ {
+          i := i
+          jobs[i] = func() int {
+              c := atomic.AddInt64(&cur, 1)
+              for {
+                  m := atomic.LoadInt64(&max)
+                  if c <= m || atomic.CompareAndSwapInt64(&max, m, c) {
+                      break
+                  }
+              }
+              time.Sleep(2 * time.Millisecond)
+              atomic.AddInt64(&cur, -1)
+              return i
+          }
+      }
+      RunPool(jobs, workers)
+      if got := atomic.LoadInt64(&max); got > workers {
+          t.Fatalf("max concurrency = %d, want <= %d", got, workers)
+      }
+  }
+
+  func TestRunPoolEmpty(t *testing.T) {
+      got := RunPool(nil, 3)
+      if len(got) != 0 {
+          t.Fatalf("RunPool(nil) len = %d, want 0", len(got))
+      }
+  }

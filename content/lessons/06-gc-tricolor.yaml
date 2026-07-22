@@ -1,0 +1,117 @@
+slug: gc-tricolor
+topic: go-internals
+title: "GC: трёхцветная маркировка"
+minutes: 9
+tags: [gc, runtime, memory]
+body_md: |
+  ## Зачем это знать
+
+  Сборщик мусора в Go даёт то, чего у C нет, — память освобождается сама, — и при этом держит паузы меньше миллисекунды. На собеседовании staff-уровня почти наверняка спросят: как GC работает конкурентно с программой и при этом ничего не теряет? Ответ упирается в трёхцветную маркировку и write barrier. Тема всплывает и на практике: когда сервис упирается в latency-хвосты, растёт по памяти или ловит OOM в контейнере — без понимания того, что запускает GC и что его тормозит, вы будете крутить `GOGC` наугад. Разберём модель так, чтобы вы могли объяснить и инвариант, и почему в Go 1.8 паузы упали в разы.
+
+  ## Три цвета
+
+  GC в Go — конкурентный, mark-and-sweep, **не перемещающий** и **не поколенческий**. В основе — разбиение объектов на три множества:
+
+  - **белые** — ещё не достигнутые, кандидаты на удаление;
+  - **серые** — достигнутые, но их ссылки ещё не просканированы (фронт волны);
+  - **чёрные** — достигнутые и полностью просканированные.
+
+  <svg viewBox="0 0 720 210" role="img" aria-label="Три множества объектов трёхцветной маркировки: белые, серые и чёрные, и переходы между ними при сканировании">
+  <defs>
+  <marker id="s61" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#0D7680"/>
+  </marker>
+  </defs>
+  <rect x="30" y="60" width="190" height="100" rx="6" fill="none" stroke="#E6E6E6"/>
+  <text x="125" y="46" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#242424">белые</text>
+  <text x="125" y="120" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">не достигнуты</text>
+  <circle cx="95" cy="95" r="12" fill="none" stroke="#757575"/>
+  <circle cx="155" cy="95" r="12" fill="none" stroke="#757575"/>
+  <rect x="265" y="60" width="190" height="100" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="360" y="46" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#0D7680">серые</text>
+  <text x="360" y="120" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">в очереди на скан</text>
+  <circle cx="330" cy="95" r="12" fill="#0D7680"/>
+  <circle cx="390" cy="95" r="12" fill="#0D7680"/>
+  <rect x="500" y="60" width="190" height="100" rx="6" fill="none" stroke="#242424"/>
+  <text x="595" y="46" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#242424">чёрные</text>
+  <text x="595" y="120" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">просканированы</text>
+  <circle cx="565" cy="95" r="12" fill="#242424"/>
+  <circle cx="625" cy="95" r="12" fill="#242424"/>
+  <line x1="222" y1="95" x2="263" y2="95" stroke="#0D7680" marker-end="url(#s61)"/>
+  <text x="242" y="82" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#0D7680">достигнут</text>
+  <line x1="457" y1="95" x2="498" y2="95" stroke="#0D7680" marker-end="url(#s61)"/>
+  <text x="477" y="82" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#0D7680">скан завершён</text>
+  <text x="360" y="192" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">старт: корни (стеки, глобальные) → серые; в конце все белые = мусор</text>
+  </svg>
+
+  Начинают с корней — стеков горутин и глобальных переменных: они становятся серыми. Пока есть серые объекты, берём один, красим в чёрный, а все белые, на которые он ссылается, — в серые. Когда серых не осталось, волна дошла до края: все оставшиеся белые объекты недостижимы, их память освобождается фазой sweep.
+
+  Важная деталь реализации: сами «цвета» не хранятся в объекте. Они живут в отдельных mark-битах в метаданных span-а, а «серый» физически означает «лежит в очереди на сканирование» (`gcWork` — per-P буферы, чтобы маркировка масштабировалась без общего лока). Сканируя объект, GC по карте указателей его типа обходит только слова-указатели, а не весь объект целиком, — это и есть та работа, которую выполняет фон маркировки.
+
+  ## Фазы цикла и паузы
+
+  Конкурентность — главная фишка и главная сложность. Практически вся маркировка идёт параллельно с программой (мутатором); под Stop-The-World остаются лишь короткие служебные отрезки.
+
+  <svg viewBox="0 0 720 170" role="img" aria-label="Фазы цикла GC на временной шкале: короткие STW mark setup и mark termination обрамляют долгую конкурентную маркировку, затем ленивый sweep">
+  <line x1="30" y1="120" x2="690" y2="120" stroke="#E6E6E6"/>
+  <rect x="30" y="70" width="26" height="50" rx="6" fill="#B4552D"/>
+  <text x="43" y="145" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#B4552D">STW</text>
+  <text x="43" y="60" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#757575">setup</text>
+  <rect x="60" y="80" width="300" height="40" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="210" y="105" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">concurrent mark (+ barrier)</text>
+  <rect x="364" y="70" width="26" height="50" rx="6" fill="#B4552D"/>
+  <text x="377" y="145" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#B4552D">STW</text>
+  <text x="377" y="60" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#757575">termination</text>
+  <rect x="394" y="80" width="296" height="40" rx="6" fill="none" stroke="#0D7680"/>
+  <text x="542" y="105" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">concurrent sweep (ленивый)</text>
+  <text x="30" y="35" font-family="system-ui, sans-serif" font-size="12" fill="#757575">красные полосы STW &lt; 1 мс; вся тяжёлая работа — параллельно с программой</text>
+  </svg>
+
+  Порядок такой: (1) короткий **STW mark setup** — включается write barrier; (2) **concurrent mark** — маркировка вместе с мутатором; (3) короткий **STW mark termination** — завершение и выключение барьера; (4) **concurrent sweep** — ленивое освобождение. Момент старта подбирает pacer, ориентируясь на `GOGC` (по умолчанию 100 — новый цикл, когда куча вырастет вдвое относительно живой). Если мутатор аллоцирует быстрее, чем GC маркирует, включаются **GC assists**: аллоцирующая горутина обязана «отработать долг», помогая маркировке, — это притормаживает того, кто мусорит.
+
+  ## Зачем нужен write barrier
+
+  Вот тонкое место. Пока GC красит объекты, мутатор продолжает переставлять указатели — и может сломать разметку. Опасный сценарий: мутатор записывает ссылку с уже **чёрного** объекта на **белый**, а единственную серую ссылку на этот белый одновременно стирает. Белый останется белым, GC сочтёт его мусором — и соберёт живой объект. Это нарушение **strong tricolor invariant**: «ни один чёрный объект не ссылается напрямую на белый».
+
+  <svg viewBox="0 0 720 200" role="img" aria-label="Write barrier: при записи указателя чёрный объект получил бы ссылку на белый, барьер вовремя перекрашивает объекты в серый и сохраняет инвариант">
+  <defs>
+  <marker id="s62" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#B4552D"/>
+  </marker>
+  <marker id="s62b" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#0D7680"/>
+  </marker>
+  </defs>
+  <circle cx="90" cy="90" r="16" fill="#242424"/>
+  <text x="90" y="130" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#242424">чёрный</text>
+  <circle cx="330" cy="90" r="16" fill="none" stroke="#757575"/>
+  <text x="330" y="130" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">белый</text>
+  <line x1="108" y1="90" x2="312" y2="90" stroke="#B4552D" marker-end="url(#s62)"/>
+  <text x="210" y="76" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#B4552D">запись ссылки (опасно!)</text>
+  <rect x="420" y="52" width="270" height="96" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="435" y="76" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">hybrid write barrier</text>
+  <text x="435" y="100" font-family="system-ui, sans-serif" font-size="12" fill="#242424">красит в серый и старую,</text>
+  <text x="435" y="120" font-family="system-ui, sans-serif" font-size="12" fill="#242424">и новую ссылку → белый спасён</text>
+  <line x1="346" y1="82" x2="418" y2="72" stroke="#0D7680" marker-end="url(#s62b)"/>
+  <text x="360" y="185" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">барьер — код, вставленный компилятором вокруг записи указателей на время марки</text>
+  </svg>
+
+  Чтобы инвариант держался, компилятор на время маркировки вставляет вокруг присваиваний указателей **write barrier**. С Go 1.8 это **hybrid write barrier** (Dijkstra + Yuasa): при записи он затемняет и старое, и новое значение указателя. Главный выигрыш — стало **не нужно пересканировать стеки** под STW в конце цикла. Раньше именно повторное сканирование всех стеков было главным источником длинных пауз; убрав его, Go получил суб-миллисекундные STW. Это и есть та веха 1.8, о которой любят спрашивать.
+
+  Ещё два рычага. `GOGC` управляет частотой: больше — реже GC и больше память, меньше — наоборот; `GOGC=off` выключает сборку. `GOMEMLIMIT` (Go 1.19) — мягкий потолок памяти: по мере приближения к лимиту GC работает чаще, помогая избегать OOM в контейнерах. Но лимит мягкий: если живых данных больше лимита, начинается **GC death spiral** — GC крутится почти непрерывно, а мутатор тонет в assist'ах.
+
+  ## Типичные заблуждения
+
+  - **«GC в Go перемещающий/компактящий».** Нет — объекты не двигаются, поэтому адреса стабильны (важно для cgo и `unsafe`), зато есть фрагментация.
+  - **«GC поколенческий».** Нет: escape analysis и дешёвый стек уже отсеивают короткоживущие объекты, и поколения не окупались.
+  - **«Write barrier — на чтение».** Нет, барьер на **запись** указателей и работает только во время фазы маркировки.
+  - **«`GOMEMLIMIT` гарантирует, что процесс не превысит память».** Нет, это soft limit — рантайм скорее допустит превышение, чем остановит прогресс.
+
+  ## Что отвечать на собеседовании
+
+  - Определите три цвета и правило перехода, обязательно назвав **strong tricolor invariant** и то, что серый — это «в очереди на сканирование».
+  - Объясните, зачем нужен **write barrier**: без него конкурентный мутатор может «спрятать» живой белый объект от сборщика.
+  - Назовите **hybrid write barrier (1.8)** и его эффект — отказ от повторного сканирования стеков и суб-миллисекундные паузы.
+  - Разведите `GOGC` (частота по росту кучи) и `GOMEMLIMIT` (мягкий потолок), упомяните GC assists и риск death spiral — это уровень staff.
+related_questions: [gc-tricolor-write-barrier, escape-analysis-allocations, struct-memory-alignment-padding, go-memory-model-happens-before]
+related_tasks: []

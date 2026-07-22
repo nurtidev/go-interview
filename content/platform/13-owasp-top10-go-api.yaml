@@ -1,0 +1,83 @@
+slug: owasp-top10-go-api
+section: platform
+title: "OWASP Top 10 для Go API: инъекции, доступ, SSRF"
+difficulty: senior
+tags: [security, owasp, api]
+question_md: |
+  Пройдитесь по OWASP Top 10 применительно к Go API. Разберите подробнее самые частые для бэкенда категории — Broken Access Control, Injection и SSRF — с конкретными примерами защиты на Go. Чем инструментально закрывают уязвимые зависимости?
+answer_levels:
+  - level: middle
+    text_md: |
+      **OWASP Top 10 (2021)** — консенсусный список самых опасных классов веб-уязвимостей:
+
+      | # | Категория | Суть |
+      |---|-----------|------|
+      | A01 | Broken Access Control | пользователь получает доступ к чужим данным/действиям |
+      | A02 | Cryptographic Failures | слабая/отсутствующая криптография (пароли, HTTPS) |
+      | A03 | Injection | SQL/command/LDAP-инъекции |
+      | A04 | Insecure Design | нет rate limiting, слабая логика по замыслу |
+      | A05 | Security Misconfiguration | debug в проде, дефолтные креды, лишние заголовки |
+      | A06 | Vulnerable & Outdated Components | зависимость с известной CVE |
+      | A07 | Identification & Auth Failures | слабые пароли, нет MFA, дырявые сессии |
+      | A08 | Software & Data Integrity Failures | небезопасная десериализация, unsigned-обновления |
+      | A09 | Logging & Monitoring Failures | не логируем/не мониторим атаки |
+      | A10 | SSRF | сервер ходит по URL из пользовательского ввода |
+
+      Для типичного JSON API самые «горячие» — **A01 (Broken Access Control)**, **A03 (Injection)** и **A10 (SSRF)**: именно они дают прямой доступ к данным или инфраструктуре. Базовая гигиена в Go: параметризованные запросы (`database/sql`), валидация входа, проверка прав на каждый ресурс, `govulncheck` в CI.
+  - level: senior
+    text_md: |
+      **A01 — Broken Access Control (самая частая на API).** Классика — **IDOR**: эндпоинт `GET /orders/{id}` проверяет только аутентификацию («ты залогинен»), но не авторизацию («это *твой* заказ»). «Пользователь залогинен» ≠ «имеет право на этот ресурс».
+      ```go
+      // ПЛОХО: вернём чужой заказ по любому id
+      order, _ := repo.GetOrder(ctx, id)
+
+      // ХОРОШО: привязываем к владельцу из проверенного токена
+      userID := auth.UserID(ctx)
+      order, err := repo.GetOrderForUser(ctx, id, userID)
+      if errors.Is(err, sql.ErrNoRows) {   // не отличаем "нет прав" от "нет объекта"
+          http.Error(w, "not found", http.StatusNotFound)
+          return
+      }
+      ```
+      Авторизацию выносят в отдельный слой (middleware + проверка владения/роли; casbin/OPA для сложного RBAC/ABAC). Никогда не доверяйте `userId`/`role` из тела запроса — только из подписанного токена/сессии.
+
+      **A03 — Injection.** SQL-инъекции закрываются **плейсхолдерами** `database/sql`, а не экранированием (детально — в отдельном вопросе про SQLi/XSS). Command injection — не собирайте shell-строку из ввода:
+      ```go
+      // ПЛОХО: shell интерпретирует ; | $() из userInput
+      exec.Command("sh", "-c", "convert "+userInput+" out.png")
+      // ХОРОШО: аргументы отдельно, без shell — метасимволы не интерпретируются
+      exec.CommandContext(ctx, "convert", userInput, "out.png")
+      ```
+
+      **A10 — SSRF.** Сервис ходит по URL из ввода → атакующий подсовывает внутренний адрес (`http://169.254.169.254/` — метаданные облака с креды). Защита — allowlist хостов **плюс** проверка *реально зарезолвленного* IP (защита от DNS rebinding):
+      ```go
+      transport := &http.Transport{
+          DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+              host, _, _ := net.SplitHostPort(addr)
+              if ip := net.ParseIP(host); ip != nil && isPrivate(ip) {
+                  return nil, errors.New("private IP blocked")
+              }
+              return (&net.Dialer{}).DialContext(ctx, network, addr)
+          },
+      }
+      ```
+      где `isPrivate` отсекает `10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16`, `::1`, `fc00::/7`. Плюс — только `https`, запрет редиректов на приватные адреса.
+  - level: deep
+    text_md: |
+      **A06 — уязвимые зависимости, инструментарий Go.** Главный штатный инструмент — **`govulncheck`** (`golang.org/x/vuln`): он не просто сверяет версии по `go.mod`, а через анализ call-graph проверяет, **вызывается ли реально** уязвимый код из вашей программы — это резко снижает шум ложных срабатываний по сравнению с обычными сканерами SCA. Ставят в CI как блокирующий шаг. Дополнительно — `go list -m -u all` для устаревших модулей, Dependabot/Renovate для автоматических PR обновлений.
+
+      **A02 — криптография в Go.** Пароли — только `bcrypt`/`argon2id` (`golang.org/x/crypto`), никогда MD5/SHA-*. Сравнение секретов/токенов — `crypto/subtle.ConstantTimeCompare` (защита от timing attack). Случайность для токенов/солей — `crypto/rand`, **не** `math/rand`.
+
+      **A05 — misconfiguration в Go-сервисе.** Не отдавать клиенту сырой текст ошибок/стектрейсы (утечка внутренностей — «leaky errors»); наружу — обобщённое сообщение, детали в лог. Security-заголовки (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, HSTS, CSP) через middleware. Отключить `pprof`/debug-эндпоинты в проде или закрыть их сетью.
+
+      **A04 / A07 / A09 практично.** A04 — rate limiting (`golang.org/x/time/rate`, per-IP/per-key, распределённо через Redis) на login и дорогих эндпоинтах; A07 — MFA, безопасные сессии, короткоживущие токены; A09 — логировать security-события (неуспешные входы, отказы авторизации) и **не** логировать сами секреты/токены/PII.
+
+      **Тонкости для staff:**
+      - IDOR не ловится сканерами — нужны тесты авторизации на уровне бизнес-логики (owner-scoped запросы, negative-тесты «чужой пользователь»).
+      - SSRF-защита обязана проверять IP **после** резолва и **на каждом редиректе**, иначе DNS rebinding / `Location: http://169.254.169.254` обходят allowlist по имени хоста.
+      - `encoding/gob` и любая десериализация недоверенных данных (A08) опасны — для внешнего ввода берите строгий JSON со схемой/валидацией, а не форматы, восстанавливающие произвольные типы.
+follow_ups:
+  - "Как отличить провал аутентификации от провала авторизации и почему IDOR — это про авторизацию?"
+  - "Почему для защиты от SSRF недостаточно проверить имя хоста и нужно проверять зарезолвленный IP на каждом редиректе?"
+  - "Чем govulncheck принципиально точнее обычных сканеров зависимостей?"
+  - "Почему math/rand нельзя использовать для генерации токенов и что взять вместо него?"

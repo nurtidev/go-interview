@@ -1,0 +1,213 @@
+slug: retry-backoff-jitter
+kind: go
+title: "Retry с экспоненциальным backoff и джиттером"
+difficulty: senior
+tags: [retry, backoff, resilience]
+statement_md: |
+  Реализуйте обёртку с повторами для ненадёжного вызова (например, внешнего
+  платёжного провайдера). Повторы не должны «добивать» деградировавший сервис.
+
+  ```go
+  type RetryableFunc func(ctx context.Context) error
+
+  type NonRetryableError struct{ Err error }
+  func (e *NonRetryableError) Error() string { return e.Err.Error() }
+  func (e *NonRetryableError) Unwrap() error { return e.Err }
+
+  func Retry(ctx context.Context, maxAttempts int, baseDelay time.Duration, fn RetryableFunc) error
+  ```
+
+  Требования:
+
+  - Не более `maxAttempts` попыток; при первом успехе — сразу `nil`.
+  - Задержка между попытками растёт экспоненциально: `baseDelay`, `2*baseDelay`,
+    `4*baseDelay`, … c джиттером ±20 %, чтобы избежать thundering herd.
+  - Если ошибка — `*NonRetryableError` (бизнес-ошибка), повтор не делается.
+  - Ожидание между попытками прерывается при отмене `ctx`.
+  - После исчерпания попыток возвращается последняя ошибка, обёрнутая так, чтобы
+    работал `errors.Is/As`.
+starter_code: |
+  package main
+
+  import (
+      "context"
+      "time"
+  )
+
+  // RetryableFunc — операция, которую повторяем при временных сбоях.
+  type RetryableFunc func(ctx context.Context) error
+
+  // NonRetryableError оборачивает ошибку, которую повторять НЕ нужно.
+  type NonRetryableError struct {
+      Err error
+  }
+
+  func (e *NonRetryableError) Error() string { return e.Err.Error() }
+  func (e *NonRetryableError) Unwrap() error { return e.Err }
+
+  // Retry вызывает fn до maxAttempts раз с экспоненциальным backoff и джиттером,
+  // прерываясь на отмену ctx или на *NonRetryableError.
+  func Retry(ctx context.Context, maxAttempts int, baseDelay time.Duration, fn RetryableFunc) error {
+      // TODO
+      return nil
+  }
+hints:
+  - "Цикл for attempt := 1; attempt <= maxAttempts; attempt++: вызвали fn, при nil — выходим; иначе решаем, ретраить ли."
+  - "Бизнес-ошибку распознавайте через errors.As(err, &nonRetryable) — надёжнее прямого приведения типов и работает сквозь обёртки. На последней попытке не спите, а сразу возвращайте ошибку."
+  - "Задержку удваивайте каждую итерацию. Джиттер — случайное смещение в пределах ±20 % от текущей задержки. Ожидание оформляйте как select { case <-ctx.Done(): return ctx.Err(); case <-time.After(wait): }."
+solution_md: |
+  ### Идея
+
+  Экспоненциальный backoff увеличивает паузу вдвое с каждой попыткой — это
+  снижает нагрузку на деградировавший сервис. Джиттер (случайное отклонение в
+  пределах ±20 %) разводит по времени повторы множества инстансов, иначе они
+  синхронно «ударят» по сервису и не дадут ему подняться (thundering herd).
+
+  Бизнес-ошибки (`*NonRetryableError`) повторять бессмысленно — распознаём их
+  через `errors.As`, который проходит сквозь обёртки. Ожидание между попытками
+  делаем через `select` с `ctx.Done()`, чтобы отмена прерывала паузу мгновенно.
+  Последнюю ошибку оборачиваем `%w`, сохраняя цепочку для `errors.Is/As`.
+
+  ### Эталонное решение
+
+  ```go
+  import (
+      "context"
+      "errors"
+      "fmt"
+      "math/rand"
+      "time"
+  )
+
+  type RetryableFunc func(ctx context.Context) error
+
+  type NonRetryableError struct {
+      Err error
+  }
+
+  func (e *NonRetryableError) Error() string { return e.Err.Error() }
+  func (e *NonRetryableError) Unwrap() error { return e.Err }
+
+  func Retry(ctx context.Context, maxAttempts int, baseDelay time.Duration, fn RetryableFunc) error {
+      if maxAttempts < 1 {
+          maxAttempts = 1
+      }
+      delay := baseDelay
+      var lastErr error
+      for attempt := 1; attempt <= maxAttempts; attempt++ {
+          err := fn(ctx)
+          if err == nil {
+              return nil
+          }
+          var nr *NonRetryableError
+          if errors.As(err, &nr) {
+              return err
+          }
+          lastErr = err
+          if attempt == maxAttempts {
+              break
+          }
+          wait := delay
+          if span := int64(delay) / 5; span > 0 { // ±20% джиттер
+              wait = delay + time.Duration(rand.Int63n(2*span+1)-span)
+          }
+          select {
+          case <-ctx.Done():
+              return ctx.Err()
+          case <-time.After(wait):
+          }
+          delay *= 2
+      }
+      return fmt.Errorf("retry: giving up after %d attempts: %w", maxAttempts, lastErr)
+  }
+  ```
+
+  Сложность: До `maxAttempts` вызовов `fn`; суммарное ожидание — геометрическая прогрессия от `baseDelay`.
+
+  ### Типичные ошибки на интервью
+
+  - Ретраить бизнес-ошибки (невалидные данные, отказ по балансу) — бессмысленная нагрузка и задержка.
+  - Backoff без джиттера — синхронные повторы всех клиентов, thundering herd.
+  - Спать после последней попытки — лишняя задержка перед возвратом ошибки.
+  - Игнорировать ctx в паузе — вызов не отменяется вовремя.
+  - Приводить тип напрямую вместо errors.As — не увидите обёрнутую ошибку.
+time_limit_sec: 15
+race: false
+test_code: |
+  package main
+
+  import (
+      "context"
+      "errors"
+      "testing"
+      "time"
+  )
+
+  func TestRetrySucceedsAfterFailures(t *testing.T) {
+      calls := 0
+      err := Retry(context.Background(), 5, time.Millisecond, func(ctx context.Context) error {
+          calls++
+          if calls < 3 {
+              return errors.New("temporary")
+          }
+          return nil
+      })
+      if err != nil {
+          t.Fatalf("Retry err = %v, want nil", err)
+      }
+      if calls != 3 {
+          t.Fatalf("calls = %d, want 3", calls)
+      }
+  }
+
+  func TestRetryExhausts(t *testing.T) {
+      sentinel := errors.New("still failing")
+      calls := 0
+      err := Retry(context.Background(), 3, time.Millisecond, func(ctx context.Context) error {
+          calls++
+          return sentinel
+      })
+      if err == nil {
+          t.Fatalf("Retry err = nil, want non-nil after exhausting attempts")
+      }
+      if !errors.Is(err, sentinel) {
+          t.Fatalf("returned error must wrap the last error")
+      }
+      if calls != 3 {
+          t.Fatalf("calls = %d, want 3", calls)
+      }
+  }
+
+  func TestRetryNonRetryableStops(t *testing.T) {
+      business := errors.New("invalid amount")
+      calls := 0
+      err := Retry(context.Background(), 5, time.Millisecond, func(ctx context.Context) error {
+          calls++
+          return &NonRetryableError{Err: business}
+      })
+      if calls != 1 {
+          t.Fatalf("calls = %d, want 1 (must not retry business errors)", calls)
+      }
+      if !errors.Is(err, business) {
+          t.Fatalf("returned error must unwrap to the business error")
+      }
+  }
+
+  func TestRetryRespectsContext(t *testing.T) {
+      ctx, cancel := context.WithCancel(context.Background())
+      calls := 0
+      go func() {
+          time.Sleep(15 * time.Millisecond)
+          cancel()
+      }()
+      err := Retry(ctx, 100, 50*time.Millisecond, func(ctx context.Context) error {
+          calls++
+          return errors.New("temporary")
+      })
+      if !errors.Is(err, context.Canceled) {
+          t.Fatalf("err = %v, want context.Canceled", err)
+      }
+      if calls > 3 {
+          t.Fatalf("calls = %d, expected to stop quickly after cancel", calls)
+      }
+  }

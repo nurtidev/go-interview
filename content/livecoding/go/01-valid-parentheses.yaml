@@ -1,0 +1,112 @@
+slug: valid-parentheses
+kind: go
+title: "Valid Parentheses"
+difficulty: middle
+tags: [stack, strings]
+statement_md: |
+  Дана строка `s`, состоящая только из символов `(){}[]`. Верните `true`,
+  если все скобки корректно сбалансированы, и `false` иначе.
+
+  Скобки сбалансированы, когда каждая открывающая скобка закрывается скобкой
+  того же типа и в правильном порядке.
+
+  Сигнатура:
+
+  ```go
+  func IsValid(s string) bool
+  ```
+
+  Примеры:
+
+  - `IsValid("()[]{}")` → `true`
+  - `IsValid("(]")` → `false`
+  - `IsValid("([)]")` → `false`
+  - `IsValid("([{}])")` → `true`
+  - `IsValid("")` → `true` (пустая строка сбалансирована)
+
+  Ограничения: `0 <= len(s) <= 10^4`, строка содержит только символы `(){}[]`.
+starter_code: |
+  package main
+
+  // IsValid сообщает, сбалансированы ли скобки в строке s.
+  func IsValid(s string) bool {
+      // TODO: используйте стек на слайсе
+      return false
+  }
+hints:
+  - "Обрабатывайте строку слева направо и отслеживайте ещё не закрытые открывающие скобки."
+  - "Подходящая структура данных — стек (LIFO). Его удобно держать на слайсе: append для push, срез s[:len(s)-1] для pop."
+  - "На каждую закрывающую скобку на вершине стека должна лежать парная открывающая. Если стек пуст или верх не парный — сразу false. После обхода стек обязан быть пустым."
+solution_md: |
+  ### Идея
+
+  Классическая задача на стек. Открывающие скобки складываем в стек. Встречая
+  закрывающую, проверяем, что на вершине лежит парная открывающая: если да —
+  снимаем её (pop), иначе строка невалидна. В конце стек обязан быть пустым;
+  непустой стек означает незакрытые скобки.
+
+  ### Эталонное решение
+
+  ```go
+  func IsValid(s string) bool {
+      pairs := map[byte]byte{')': '(', ']': '[', '}': '{'}
+      stack := make([]byte, 0, len(s))
+      for i := 0; i < len(s); i++ {
+          c := s[i]
+          switch c {
+          case '(', '[', '{':
+              stack = append(stack, c)
+          case ')', ']', '}':
+              if len(stack) == 0 || stack[len(stack)-1] != pairs[c] {
+                  return false
+              }
+              stack = stack[:len(stack)-1]
+          }
+      }
+      return len(stack) == 0
+  }
+  ```
+
+  Сложность: время `O(n)`, память `O(n)` в худшем случае (строка из одних
+  открывающих скобок).
+
+  ### Типичные ошибки на интервью
+
+  - Забыть проверку пустого стека в конце — строка `"("` пройдёт как валидная.
+  - Не обработать pop из пустого стека для строки вроде `"]"`.
+  - Считать скобки по количеству вместо стека — это не ловит неверный порядок `"([)]"`.
+time_limit_sec: 10
+race: false
+test_code: |
+  package main
+
+  import "testing"
+
+  func TestIsValid(t *testing.T) {
+      cases := []struct {
+          name string
+          in   string
+          want bool
+      }{
+          {"empty", "", true},
+          {"simple round", "()", true},
+          {"all types", "()[]{}", true},
+          {"nested", "([{}])", true},
+          {"wrong order", "(]", false},
+          {"mismatch close", "([)]", false},
+          {"unclosed", "(", false},
+          {"extra close", "())", false},
+          {"only close", "]", false},
+          {"deep nested", "((((()))))", true},
+          {"interleaved ok", "{[()()]}", true},
+          {"single open brace", "{", false},
+      }
+      for _, tc := range cases {
+          t.Run(tc.name, func(t *testing.T) {
+              got := IsValid(tc.in)
+              if got != tc.want {
+                  t.Fatalf("IsValid(%q) = %v, want %v", tc.in, got, tc.want)
+              }
+          })
+      }
+  }

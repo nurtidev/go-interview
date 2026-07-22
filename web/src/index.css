@@ -1,0 +1,335 @@
+/* ============================================================================
+   Шрифты — самохостинг через @fontsource (npm), НЕ Google Fonts CDN.
+   Каждый вес включает subset cyrillic (отдельные @font-face с unicode-range).
+   ========================================================================== */
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/pt-serif/400.css";
+@import "@fontsource/pt-serif/700.css";
+@import "@fontsource/pt-serif/400-italic.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/600.css";
+
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Тёмная тема через класс .dark на <html> (не media-query). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ============================================================================
+   Маппинг токенов «графит» в Tailwind v4.
+   `inline` обязателен: утилиты эмитят var(--token) напрямую, поэтому .dark,
+   переопределяя базовые токены, каскадно перекрашивает весь UI без dark:-классов.
+   ========================================================================== */
+@theme inline {
+    /* Шрифты */
+    --font-sans: var(--font-ui);
+    --font-serif: var(--font-content);
+    --font-mono: var(--font-code);
+    --font-heading: var(--font-content);
+
+    /* --- shadcn-семантика (перекрашена на графит) --- */
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --color-card: var(--card);
+    --color-card-foreground: var(--card-foreground);
+    --color-popover: var(--popover);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-primary: var(--primary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-secondary: var(--secondary);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-muted: var(--muted);
+    --color-muted-foreground: var(--muted-foreground);
+    /* shadcn «accent» = мягкая подсветка hover (не путать с графитовым --accent = чернила) */
+    --color-accent: var(--accent-soft);
+    --color-accent-foreground: var(--ink);
+    --color-destructive: var(--destructive);
+    --color-border: var(--border);
+    --color-input: var(--input);
+    --color-ring: var(--ring);
+    --color-chart-1: var(--chart-1);
+    --color-chart-2: var(--chart-2);
+    --color-chart-3: var(--chart-3);
+    --color-chart-4: var(--chart-4);
+    --color-chart-5: var(--chart-5);
+    --color-sidebar: var(--sidebar);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-ring: var(--sidebar-ring);
+
+    /* --- Графит: прямые токены (контракт с контентным агентом) --- */
+    --color-bg: var(--bg);
+    --color-surface: var(--surface);
+    --color-surface-2: var(--surface-2);
+    --color-ink: var(--ink);
+    --color-ink-2: var(--ink-2);
+    --color-ink-3: var(--ink-3);
+    --color-hairline: var(--hairline);
+    --color-accent-soft: var(--accent-soft);
+    --color-accent-hover: var(--accent-hover);
+    --color-tint-neutral: var(--tint-neutral);
+    --color-field-border: var(--field-border);
+    --color-ok: var(--ok);
+    --color-ok-soft: var(--ok-soft);
+    --color-warn: var(--warn);
+    --color-warn-soft: var(--warn-soft);
+    --color-err: var(--err);
+    --color-err-soft: var(--err-soft);
+    --color-info: var(--info);
+    --color-info-soft: var(--info-soft);
+    --color-staff: var(--staff);
+    --color-staff-soft: var(--staff-soft);
+    --color-editor: var(--editor);
+    --color-editor-ink: var(--editor-ink);
+    --color-editor-line: var(--editor-line);
+
+    /* Радиусы */
+    --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
+    --radius-2xl: calc(var(--radius) + 8px);
+}
+
+/* ============================================================================
+   Светлая тема — базовые токены «графит» (ровно по README / макету 1a).
+   ========================================================================== */
+:root {
+    --radius: 0.625rem; /* 10px = --r-md */
+
+    /* Семейства шрифтов (для var(--font-*) в любом месте) */
+    --font-ui: 'IBM Plex Sans', -apple-system, 'Segoe UI', sans-serif;
+    --font-content: 'PT Serif', Georgia, serif;
+    --font-code: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+
+    /* Палитра «графит» — светлая */
+    --bg: #faf9f7;
+    --surface: #ffffff;
+    --ink: #26241f;
+    --ink-2: #6b675e;
+    --ink-3: #9a948a;
+    --hairline: #e8e4dc;
+    --accent: #26241f;
+    --accent-hover: #4a463e;
+    --accent-soft: #edeae3;
+    --ok: #2e7d4f;
+    --ok-soft: #e6f1e9;
+    --warn: #a87b23;
+    --warn-soft: #f7eeda;
+    --err: #be4238;
+    --err-soft: #f9e8e5;
+    --info: #3f6ba6;
+    --info-soft: #e8eef6;
+    --staff: #5b4a7a;
+    --staff-soft: #eeeaf4;
+    --editor: #1e2023;
+    --editor-ink: #d6d9de;
+    --editor-line: #33373d;
+
+    /* Радиусы / тени (из README) */
+    --r-sm: 6px;
+    --r-md: 10px;
+    --r-pill: 999px;
+    --shadow-sm: 0 1px 2px rgba(30, 22, 12, 0.06);
+    --shadow-md: 0 4px 16px rgba(30, 22, 12, 0.1);
+    --nav-h: 56px;
+
+    /* Вспомогательные нейтрали из макетов (не в контракте, только для моих экранов) */
+    --surface-2: #f5f3ee; /* лёгкая «облачная» поверхность: hover строк, шапки таблиц */
+    --tint-neutral: #f0ede7; /* нейтральный тинт: бейдж middle */
+    --field-border: #d8d3c8; /* граница инпутов и dashed empty-state */
+    --glyph-empty: #c9c3b7; /* глиф [ ] в empty-state */
+    --scrim: rgb(38 36 31 / 0.4); /* затемнение под модалкой */
+
+    /* Heatmap-ramp (макет 1o): меньше → больше */
+    --heat-0: #f0ede7;
+    --heat-1: #c4beb2;
+    --heat-2: #7c766b;
+    --heat-3: #26241f;
+
+    /* --- shadcn-семантика, выраженная через токены графита --- */
+    --background: var(--bg);
+    --foreground: var(--ink);
+    --card: var(--surface);
+    --card-foreground: var(--ink);
+    --popover: var(--surface);
+    --popover-foreground: var(--ink);
+    --primary: var(--accent);
+    --primary-foreground: var(--bg);
+    --secondary: var(--accent-soft);
+    --secondary-foreground: var(--ink);
+    --muted: var(--accent-soft);
+    --muted-foreground: var(--ink-2);
+    --destructive: var(--err);
+    --border: var(--hairline);
+    --input: var(--hairline);
+    --ring: var(--accent);
+    --chart-1: var(--ink);
+    --chart-2: var(--ink-2);
+    --chart-3: var(--ink-3);
+    --chart-4: var(--hairline);
+    --chart-5: var(--accent-soft);
+    --sidebar: var(--surface);
+    --sidebar-foreground: var(--ink);
+    --sidebar-primary: var(--accent);
+    --sidebar-primary-foreground: var(--bg);
+    --sidebar-accent: var(--accent-soft);
+    --sidebar-accent-foreground: var(--ink);
+    --sidebar-border: var(--hairline);
+    --sidebar-ring: var(--accent);
+
+    color-scheme: light;
+}
+
+/* ============================================================================
+   Тёмная тема — переопределяем только базовые токены; shadcn-переменные
+   ссылаются на них через var() и перерешаются автоматически (макет 1a .dark).
+   ========================================================================== */
+.dark {
+    --bg: #17181b;
+    --surface: #1f2126;
+    --ink: #e9e6e0;
+    --ink-2: #a7a29a;
+    --ink-3: #7c7871;
+    --hairline: #2e3036;
+    --accent: #e9e6e0;
+    --accent-hover: #cfcbc3;
+    --accent-soft: #2a2c31;
+    --ok: #5fa57e;
+    --ok-soft: #20302a;
+    --warn: #d8a44a;
+    --warn-soft: #332a18;
+    --err: #e07b6f;
+    --err-soft: #362220;
+    --info: #7fa3cf;
+    --info-soft: #20293a;
+    --staff: #9d8bc4;
+    --staff-soft: #2a2536;
+    --editor: #1e2023;
+
+    /* Вспомогательные нейтрали — тёмные эквиваленты */
+    --surface-2: #24262b;
+    --tint-neutral: #2a2c31;
+    --field-border: #3a3d43;
+    --glyph-empty: #4a4d53;
+    --scrim: rgb(0 0 0 / 0.55);
+
+    /* Heatmap-ramp — тёмная (от едва заметного к яркому чернилу) */
+    --heat-0: #24262b;
+    --heat-1: #4a4d53;
+    --heat-2: #8a857c;
+    --heat-3: #e9e6e0;
+
+    color-scheme: dark;
+}
+
+@layer base {
+    * {
+        @apply border-border outline-ring/50;
+    }
+    body {
+        @apply bg-background text-foreground font-sans antialiased;
+    }
+}
+
+/* ============================================================================
+   Лендинг GoPrep (маршрут «/» для гостей). Живёт ВНЕ темизации приложения:
+   `.goprep-landing` пиннит светлые значения токенов, поэтому даже когда на
+   <html> висит `.dark` (системная тёмная у гостя), лендинг остаётся светлым
+   («бумага»). Внутри — и утилиты-токены (text-ink, border-hairline…), и точные
+   литералы glass/тёмных блоков из спеки LANDING.md.
+   ========================================================================== */
+.goprep-landing {
+    /* Пин светлой палитры «графит» — лендинг не темизируется. */
+    --bg: #faf9f7;
+    --surface: #ffffff;
+    --ink: #26241f;
+    --ink-2: #6b675e;
+    --ink-3: #9a948a;
+    --hairline: #e8e4dc;
+    --accent: #26241f;
+    --accent-hover: #4a463e;
+    --accent-soft: #edeae3;
+    --ok: #2e7d4f;
+    --ok-soft: #e6f1e9;
+    --warn: #a87b23;
+    --warn-soft: #f7eeda;
+    --err: #be4238;
+    --err-soft: #f9e8e5;
+    --info: #3f6ba6;
+    --info-soft: #e8eef6;
+    --staff: #5b4a7a;
+    --staff-soft: #eeeaf4;
+    --surface-2: #f5f3ee;
+    --tint-neutral: #f0ede7;
+    --editor: #1e2023;
+    --editor-ink: #d6d9de;
+
+    color-scheme: light;
+    background: #faf9f7;
+    color: #26241f;
+}
+
+/* --- Liquid-glass: строго 4 поверхности + лёгкое стекло вторичной кнопки hero.
+   Точные rgba/blur из LANDING.md. Fallback ниже — непрозрачная «бумага». --- */
+.lp-glass-nav {
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(20px) saturate(1.4);
+    -webkit-backdrop-filter: blur(20px) saturate(1.4);
+    border: 1px solid rgba(38, 36, 31, 0.1);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.8),
+        0 8px 28px rgba(30, 22, 12, 0.08);
+}
+.lp-glass-card {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(24px) saturate(1.3);
+    -webkit-backdrop-filter: blur(24px) saturate(1.3);
+    border: 1px solid rgba(38, 36, 31, 0.1);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.9),
+        0 24px 56px rgba(30, 22, 12, 0.12);
+}
+.lp-glass-timer {
+    background: rgba(255, 255, 255, 0.6);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid rgba(38, 36, 31, 0.1);
+    box-shadow: 0 12px 28px rgba(30, 22, 12, 0.14);
+}
+.lp-glass-testimonial {
+    background: rgba(255, 255, 255, 0.75);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(38, 36, 31, 0.08);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.9),
+        0 8px 24px rgba(30, 22, 12, 0.06);
+}
+.lp-glass-btn {
+    background: rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(38, 36, 31, 0.22);
+}
+
+/* Fallback без backdrop-filter → непрозрачный фон вместо стекла. */
+@supports not (backdrop-filter: blur(1px)) {
+    .lp-glass-nav,
+    .lp-glass-card,
+    .lp-glass-timer,
+    .lp-glass-testimonial {
+        background: #ffffff;
+    }
+    .lp-glass-btn {
+        background: #f5f3ee;
+    }
+}

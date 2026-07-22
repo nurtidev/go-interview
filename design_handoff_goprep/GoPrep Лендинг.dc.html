@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=PT+Serif:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&subset=cyrillic&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#FAF9F7;font-family:'IBM Plex Sans',-apple-system,'Segoe UI',sans-serif;color:#26241F}
+a{color:#26241F}a:hover{color:#4A463E}
+</style>
+</helmet>
+<div style="min-height:100vh;background:#FAF9F7">
+
+  <div style="position:sticky;top:0;z-index:20;display:flex;justify-content:center;padding:14px 24px 0">
+    <div style="width:100%;max-width:920px;height:52px;border-radius:999px;background:rgba(255,255,255,.55);backdrop-filter:blur(20px) saturate(1.4);border:1px solid rgba(38,36,31,.1);box-shadow:inset 0 1px 0 rgba(255,255,255,.8),0 8px 28px rgba(30,22,12,.08);display:flex;align-items:center;gap:26px;padding:0 26px;box-sizing:border-box">
+      <div style="font:600 16px 'IBM Plex Sans',sans-serif">GoPrep<span style="color:#9A948A">_</span></div>
+      <div style="display:flex;gap:22px;font:500 13px 'IBM Plex Sans',sans-serif;color:#6B675E">
+        <span>Как это работает</span><span>Программа</span><span>Отзывы</span><span>FAQ</span>
+      </div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <span style="font:500 13px 'IBM Plex Sans',sans-serif;color:#6B675E">Войти</span>
+        <button style="font:500 13px 'IBM Plex Sans',sans-serif;color:#FAF9F7;background:#26241F;border:none;border-radius:999px;padding:8px 18px;cursor:pointer">Начать бесплатно</button>
+      </div>
+    </div>
+  </div>
+
+  <div style="position:relative;overflow:hidden">
+    <div style="position:absolute;inset:0;pointer-events:none">
+      <div style="position:absolute;top:-140px;right:-100px;width:560px;height:560px;border-radius:50%;background:radial-gradient(circle,rgba(190,178,160,.28),rgba(190,178,160,0) 65%)"></div>
+      <div style="position:absolute;bottom:-200px;left:-140px;width:520px;height:520px;border-radius:50%;background:radial-gradient(circle,rgba(170,180,195,.22),rgba(170,180,195,0) 65%)"></div>
+    </div>
+    <div style="position:relative;max-width:1080px;margin:0 auto;padding:72px 40px 92px;display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center">
+      <div style="display:flex;flex-direction:column;gap:24px">
+        <div style="font:600 11px 'JetBrains Mono',monospace;letter-spacing:.1em;color:#9A948A">ТРЕНАЖЁР СОБЕСЕДОВАНИЙ · SENIOR GOLANG</div>
+        <div style="font:700 50px/1.15 'PT Serif',Georgia,serif;text-wrap:balance">Оффер senior-грейда — это не удача. Это подготовка.</div>
+        <div style="font:16.5px/1.65 'IBM Plex Sans',sans-serif;color:#6B675E;text-wrap:pretty;max-width:460px">Вопросы с реальных секций Яндекса, Ozon, Авито и Т-Банка. Интервальное повторение доводит ответы до автоматизма — на интервью вы говорите, а не вспоминаете.</div>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <button style="font:500 15px 'IBM Plex Sans',sans-serif;color:#FAF9F7;background:#26241F;border:none;border-radius:999px;padding:13px 28px;cursor:pointer">Начать бесплатно</button>
+          <button style="font:500 15px 'IBM Plex Sans',sans-serif;color:#26241F;background:rgba(255,255,255,.5);backdrop-filter:blur(12px);border:1px solid rgba(38,36,31,.22);border-radius:999px;padding:12px 24px;cursor:pointer">Попробовать вопрос ↓</button>
+        </div>
+        <div style="display:flex;gap:28px;flex-wrap:wrap">
+          <div style="display:flex;flex-direction:column;gap:2px"><span style="font:600 22px 'JetBrains Mono',monospace">156</span><span style="font:11.5px 'IBM Plex Sans',sans-serif;color:#9A948A">вопросов с секций</span></div>
+          <div style="display:flex;flex-direction:column;gap:2px"><span style="font:600 22px 'JetBrains Mono',monospace">24</span><span style="font:11.5px 'IBM Plex Sans',sans-serif;color:#9A948A">задачи лайвкодинга</span></div>
+          <div style="display:flex;flex-direction:column;gap:2px"><span style="font:600 22px 'JetBrains Mono',monospace">15 мин</span><span style="font:11.5px 'IBM Plex Sans',sans-serif;color:#9A948A">в день достаточно</span></div>
+        </div>
+      </div>
+      <div style="position:relative">
+        <div style="border-radius:18px;background:rgba(255,255,255,.72);backdrop-filter:blur(24px) saturate(1.3);border:1px solid rgba(38,36,31,.1);box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 24px 56px rgba(30,22,12,.12);padding:22px;display:flex;flex-direction:column;gap:14px">
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font:500 11px 'IBM Plex Sans',sans-serif;color:#26241F;background:#EDEAE3;border-radius:999px;padding:3px 10px">senior</span>
+            <span style="font:500 11px 'IBM Plex Sans',sans-serif;color:#A87B23;background:#F7EEDA;border-radius:999px;padding:3px 10px">к повторению</span>
+            <span style="margin-left:auto;font:10.5px 'JetBrains Mono',monospace;color:#9A948A">12 / 40</span>
+          </div>
+          <div style="font:700 19px/1.4 'PT Serif',Georgia,serif;text-wrap:pretty">Что происходит при отправке в закрытый канал?</div>
+          <div style="display:flex;flex-direction:column;gap:6px;border-top:1px solid #E8E4DC;padding-top:12px">
+            <span style="font:500 10.5px 'IBM Plex Sans',sans-serif;color:#6B675E;background:#F0EDE7;border-radius:999px;padding:2px 8px;align-self:flex-start">middle</span>
+            <div style="font:14.5px/1.6 'PT Serif',Georgia,serif">Паника <span style="font:11.5px 'JetBrains Mono',monospace;background:#F0EDE7;border-radius:4px;padding:1px 5px">send on closed channel</span>; чтение — ноль типа и <span style="font:11.5px 'JetBrains Mono',monospace;background:#F0EDE7;border-radius:4px;padding:1px 5px">ok == false</span>.</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;border-top:1px solid #E8E4DC;padding-top:12px">
+            <span style="font:500 10.5px 'IBM Plex Sans',sans-serif;color:#26241F;background:#EDEAE3;border-radius:999px;padding:2px 8px">senior</span>
+            <span style="font:500 12.5px 'IBM Plex Sans',sans-serif;text-decoration:underline;text-underline-offset:3px">Раскрыть уровень</span>
+          </div>
+          <div style="display:flex;gap:6px;border-top:1px solid #E8E4DC;padding-top:14px">
+            <span style="font:500 11.5px 'IBM Plex Sans',sans-serif;color:#BE4238;background:#F9E8E5;border-radius:999px;padding:6px 12px">Снова</span>
+            <span style="font:500 11.5px 'IBM Plex Sans',sans-serif;color:#A87B23;background:#F7EEDA;border-radius:999px;padding:6px 12px">Трудно</span>
+            <span style="font:500 11.5px 'IBM Plex Sans',sans-serif;color:#2E7D4F;background:#E6F1E9;border-radius:999px;padding:6px 12px">Хорошо</span>
+            <span style="font:500 11.5px 'IBM Plex Sans',sans-serif;color:#3F6BA6;background:#E8EEF6;border-radius:999px;padding:6px 12px">Легко</span>
+          </div>
+        </div>
+        <div style="position:absolute;right:-14px;bottom:-24px;border-radius:999px;background:rgba(255,255,255,.6);backdrop-filter:blur(18px);border:1px solid rgba(38,36,31,.1);box-shadow:0 12px 28px rgba(30,22,12,.14);display:flex;align-items:center;gap:9px;padding:9px 18px">
+          <div style="width:7px;height:7px;border-radius:50%;background:#2E7D4F"></div>
+          <span style="font:600 16px 'JetBrains Mono',monospace">18:42</span>
+          <span style="font:11px 'IBM Plex Sans',sans-serif;color:#9A948A">фокус 25/5</span>
+        </div>
+      </div>
+    </div>
+    <div style="position:relative;border-top:1px solid #E8E4DC">
+      <div style="max-width:1080px;margin:0 auto;padding:22px 40px;display:flex;gap:36px;align-items:center;flex-wrap:wrap">
+        <span style="font:600 10.5px 'JetBrains Mono',monospace;letter-spacing:.08em;color:#9A948A">ГОТОВИМ К ФОРМАТАМ СЕКЦИЙ</span>
+        <div style="display:flex;gap:26px;font:500 13.5px 'IBM Plex Sans',sans-serif;color:#6B675E"><span>Яндекс</span><span>Ozon</span><span>Авито</span><span>Т-Банк</span><span>СБЕР</span><span>VK</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid #E8E4DC;background:#26241F">
+    <div style="max-width:1080px;margin:0 auto;padding:64px 40px;display:grid;grid-template-columns:.9fr 1.1fr;gap:56px;align-items:center">
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div style="font:600 11px 'JetBrains Mono',monospace;letter-spacing:.1em;color:#7C7871">ПОЧЕМУ ВАЛЯТСЯ СИЛЬНЫЕ</div>
+        <div style="font:700 30px/1.3 'PT Serif',Georgia,serif;color:#FAF9F7;text-wrap:pretty">Вы пишете на Go пять лет. И всё равно плывёте на вопросе про закрытый канал.</div>
+        <div style="font:15px/1.7 'IBM Plex Sans',sans-serif;color:#A7A29A;text-wrap:pretty">Работа и собеседование — разные виды спорта. На работе вы решаете задачи, на интервью — объясняете внутренности под таймером. Это тренируется. Отдельно.</div>
+      </div>
+      <div style="display:flex;flex-direction:column">
+        <div style="display:flex;gap:16px;padding:18px 0;border-top:1px solid #3A3833">
+          <span style="font:600 13px 'JetBrains Mono',monospace;color:#7C7871;flex:none">01</span>
+          <div style="display:flex;flex-direction:column;gap:4px"><span style="font:600 15px 'IBM Plex Sans',sans-serif;color:#FAF9F7">Знаете — но не можете рассказать</span><span style="font:13.5px/1.6 'IBM Plex Sans',sans-serif;color:#A7A29A">Интервьюер копает на три уровня: «а как это устроено внутри?» — и обрыв на втором.</span></div>
+        </div>
+        <div style="display:flex;gap:16px;padding:18px 0;border-top:1px solid #3A3833">
+          <span style="font:600 13px 'JetBrains Mono',monospace;color:#7C7871;flex:none">02</span>
+          <div style="display:flex;flex-direction:column;gap:4px"><span style="font:600 15px 'IBM Plex Sans',sans-serif;color:#FAF9F7">Прочитали — и забыли через неделю</span><span style="font:13.5px/1.6 'IBM Plex Sans',sans-serif;color:#A7A29A">Конспекты и плейлисты не работают без системы повторения. Мозгу нужны интервалы, а не марафоны.</span></div>
+        </div>
+        <div style="display:flex;gap:16px;padding:18px 0;border-top:1px solid #3A3833;border-bottom:1px solid #3A3833">
+          <span style="font:600 13px 'JetBrains Mono',monospace;color:#7C7871;flex:none">03</span>
+          <div style="display:flex;flex-direction:column;gap:4px"><span style="font:600 15px 'IBM Plex Sans',sans-serif;color:#FAF9F7">Лайвкодинг под таймером — ступор</span><span style="font:13.5px/1.6 'IBM Plex Sans',sans-serif;color:#A7A29A">Дома решаете за вечер, на секции — 25 минут и чужие глаза. Стресс снимается только повторением формата.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid #E8E4DC">
+    <div style="max-width:1080px;margin:0 auto;padding:72px 40px;display:flex;flex-direction:column;gap:44px">
+      <div style="display:flex;flex-direction:column;gap:10px;max-width:640px">
+        <div style="font:600 11px 'JetBrains Mono',monospace;letter-spacing:.1em;color:#9A948A">КАК ЭТО РАБОТАЕТ</div>
+        <div style="font:700 32px/1.25 'PT Serif',Georgia,serif;text-wrap:pretty">Готовьтесь как спортсмен: план, подходы, повторения</div>
+      </div>
+      <div style="display:flex;flex-direction:column">
+        <div style="display:grid;grid-template-columns:64px 1fr 380px;gap:24px;padding:26px 0;border-top:1px solid #E8E4DC;align-items:center">
+          <span style="font:600 20px 'JetBrains Mono',monospace;color:#9A948A">01</span>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span style="font:600 18px 'IBM Plex Sans',sans-serif">Закройте пробелы за 5–10 минут в день</span>
+            <span style="font:14.5px/1.65 'IBM Plex Sans',sans-serif;color:#6B675E;text-wrap:pretty">Учебник со схемами по темам, которые реально спрашивают: планировщик, каналы изнутри, GC. Читается с телефона — в метро, в очереди, перед сном.</span>
+          </div>
+          <div style="border:1px solid #E8E4DC;border-radius:10px;background:#fff;padding:14px 16px;display:flex;flex-direction:column;gap:8px">
+            <div style="font:700 14px 'PT Serif',Georgia,serif">Каналы изнутри: hchan, очереди, блокировки</div>
+            <div style="display:flex;align-items:center;gap:10px"><div style="flex:1;height:4px;background:#E8E4DC;border-radius:2px;overflow:hidden;display:flex;gap:2px"><div style="flex:1;background:#26241F"></div><div style="flex:1;background:#26241F"></div><div style="flex:1;background:#26241F"></div><div style="flex:1;background:#26241F"></div><div style="flex:1;background:#E8E4DC"></div><div style="flex:1;background:#E8E4DC"></div><div style="flex:1;background:#E8E4DC"></div><div style="flex:1;background:#E8E4DC"></div><div style="flex:1;background:#E8E4DC"></div></div><span style="font:10.5px 'JetBrains Mono',monospace;color:#9A948A">гл. 5/9 · ~8 мин</span></div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:64px 1fr 380px;gap:24px;padding:26px 0;border-top:1px solid #E8E4DC;align-items:center">
+          <span style="font:600 20px 'JetBrains Mono',monospace;color:#9A948A">02</span>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span style="font:600 18px 'IBM Plex Sans',sans-serif">Отвечайте глубже, чем ждёт интервьюер</span>
+            <span style="font:14.5px/1.65 'IBM Plex Sans',sans-serif;color:#6B675E;text-wrap:pretty">Каждый вопрос — лестница из трёх ответов: middle → senior → deep. Отвечаете вслух, сверяетесь, честно оцениваете себя — и SM-2 вернёт вопрос ровно перед тем, как вы его забудете.</span>
+          </div>
+          <div style="border:1px solid #E8E4DC;border-radius:10px;background:#fff;padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+            <div style="font:700 14px 'PT Serif',Georgia,serif;text-wrap:pretty">Что происходит при отправке в закрытый канал?</div>
+            <div style="display:flex;gap:5px"><span style="font:500 10.5px 'IBM Plex Sans',sans-serif;color:#6B675E;background:#F0EDE7;border-radius:999px;padding:2px 8px">middle ✓</span><span style="font:500 10.5px 'IBM Plex Sans',sans-serif;color:#26241F;background:#EDEAE3;border-radius:999px;padding:2px 8px">senior ✓</span><span style="font:500 10.5px 'IBM Plex Sans',sans-serif;color:#5B4A7A;background:#EEEAF4;border-radius:999px;padding:2px 8px">deep…</span></div>
+            <div style="display:flex;gap:5px"><span style="font:500 11px 'IBM Plex Sans',sans-serif;color:#BE4238;background:#F9E8E5;border-radius:999px;padding:4px 10px">Снова</span><span style="font:500 11px 'IBM Plex Sans',sans-serif;color:#A87B23;background:#F7EEDA;border-radius:999px;padding:4px 10px">Трудно</span><span style="font:500 11px 'IBM Plex Sans',sans-serif;color:#2E7D4F;background:#E6F1E9;border-radius:999px;padding:4px 10px">Хорошо</span><span style="font:500 11px 'IBM Plex Sans',sans-serif;color:#3F6BA6;background:#E8EEF6;border-radius:999px;padding:4px 10px">Легко</span></div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:64px 1fr 380px;gap:24px;padding:26px 0;border-top:1px solid #E8E4DC;border-bottom:1px solid #E8E4DC;align-items:center">
+          <span style="font:600 20px 'JetBrains Mono',monospace;color:#9A948A">03</span>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span style="font:600 18px 'IBM Plex Sans',sans-serif">Прорешайте лайвкодинг в условиях секции</span>
+            <span style="font:14.5px/1.65 'IBM Plex Sans',sans-serif;color:#6B675E;text-wrap:pretty">25 минут на задачу, тесты на сервере — как на реальном интервью. Застряли — подсказки по одной каждые 5 минут, потом разбор. Решённое возвращается через 7, 21 и 60 дней — написать по памяти.</span>
+          </div>
+          <div style="border-radius:10px;background:#1E2023;padding:14px 16px;display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:center;justify-content:space-between"><span style="font:500 12px 'JetBrains Mono',monospace;color:#D6D9DE">lru.go</span><span style="font:600 13px 'JetBrains Mono',monospace;color:#E9E6E0">18:42</span></div>
+            <div style="font:11.5px/1.7 'JetBrains Mono',monospace"><span style="color:#7DBE8E">PASS  TestLRU_SetGet</span><br><span style="color:#7DBE8E">PASS  TestLRU_Eviction</span><br><span style="color:#E08A80">FAIL  TestLRU_TTLExpiry</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid #E8E4DC;background:#F5F3EE">
+    <div style="max-width:1080px;margin:0 auto;padding:72px 40px;display:flex;flex-direction:column;gap:36px">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font:600 11px 'JetBrains Mono',monospace;letter-spacing:.1em;color:#9A948A">ОТЗЫВЫ</div>
+        <div style="font:700 32px/1.25 'PT Serif',Georgia,serif;max-width:560px;text-wrap:pretty">Проверено на чужих собеседованиях</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:24px">
+        <div style="background:rgba(255,255,255,.75);backdrop-filter:blur(16px);border:1px solid rgba(38,36,31,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 8px 24px rgba(30,22,12,.06);border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:14px">
+          <div style="font:400 15.5px/1.6 'PT Serif',Georgia,serif;font-style:italic;text-wrap:pretty">«На секции по Go спросили ровно то, что я повторял утром: hchan и вытеснение из буфера. Отвечал на уровне deep — интервьюер сам перешёл к следующей теме»</div>
+          <div style="margin-top:auto;display:flex;align-items:center;gap:10px">
+            <div style="width:34px;height:34px;border-radius:50%;background:#E8E4DC;display:flex;align-items:center;justify-content:center;font:600 12px 'IBM Plex Sans',sans-serif;color:#6B675E">ДК</div>
+            <div style="display:flex;flex-direction:column"><span style="font:600 13px 'IBM Plex Sans',sans-serif">Дмитрий К.</span><span style="font:11.5px 'IBM Plex Sans',sans-serif;color:#9A948A">оффер Senior Go · e-com, Москва</span></div>
+          </div>
+        </div>
+        <div style="background:rgba(255,255,255,.75);backdrop-filter:blur(16px);border:1px solid rgba(38,36,31,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 8px 24px rgba(30,22,12,.06);border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:14px">
+          <div style="font:400 15.5px/1.6 'PT Serif',Georgia,serif;font-style:italic;text-wrap:pretty">«Главное — режим 25/5. Первые задачи заваливал по таймеру, к третьей неделе перестал паниковать. На реальном лайвкодинге было ощущение, что я это уже делал»</div>
+          <div style="margin-top:auto;display:flex;align-items:center;gap:10px">
+            <div style="width:34px;height:34px;border-radius:50%;background:#E8E4DC;display:flex;align-items:center;justify-content:center;font:600 12px 'IBM Plex Sans',sans-serif;color:#6B675E">АС</div>
+            <div style="display:flex;flex-direction:column"><span style="font:600 13px 'IBM Plex Sans',sans-serif">Артём С.</span><span style="font:11.5px 'IBM Plex Sans',sans-serif;color:#9A948A">оффер Senior Go · финтех</span></div>
+          </div>
+        </div>
+        <div style="background:rgba(255,255,255,.75);backdrop-filter:blur(16px);border:1px solid rgba(38,36,31,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 8px 24px rgba(30,22,12,.06);border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:14px">
+          <div style="font:400 15.5px/1.6 'PT Serif',Georgia,serif;font-style:italic;text-wrap:pretty">«Готовилась в декрете по 15 минут с телефона. Повторение само решало, что учить сегодня — не тратила ни минуты на планирование. Два оффера из трёх финалов»</div>
+          <div style="margin-top:auto;display:flex;align-items:center;gap:10px">
+            <div style="width:34px;height:34px;border-radius:50%;background:#E8E4DC;display:flex;align-items:center;justify-content:center;font:600 12px 'IBM Plex Sans',sans-serif;color:#6B675E">МВ</div>
+            <div style="display:flex;flex-direction:column"><span style="font:600 13px 'IBM Plex Sans',sans-serif">Мария В.</span><span style="font:11.5px 'IBM Plex Sans',sans-serif;color:#9A948A">оффер Senior Go · банк</span></div>
+          </div>
+        </div>
+      </div>
+      <div style="font:11.5px 'IBM Plex Sans',sans-serif;color:#9A948A">Плейсхолдеры — заменить на реальные отзывы бета-пользователей.</div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid #E8E4DC">
+    <div style="max-width:1080px;margin:0 auto;padding:72px 40px;display:grid;grid-template-columns:.9fr 1.1fr;gap:64px">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div style="font:600 11px 'JetBrains Mono',monospace;letter-spacing:.1em;color:#9A948A">ПРОГРАММА</div>
+        <div style="font:700 32px/1.25 'PT Serif',Georgia,serif;text-wrap:pretty">Только то, что спрашивают. Ничего «на всякий случай»</div>
+        <div style="font:15px/1.65 'IBM Plex Sans',sans-serif;color:#6B675E;text-wrap:pretty">Программа собрана из реальных секций Go-собеседований больших компаний СНГ и обновляется по свежим интервью. Каждый вопрос — с лестницей из трёх ответов и ссылкой на главу учебника.</div>
+        <button style="font:500 14px 'IBM Plex Sans',sans-serif;color:#26241F;background:none;border:1px solid #26241F;border-radius:999px;padding:10px 20px;cursor:pointer;align-self:flex-start">Смотреть все темы</button>
+      </div>
+      <div style="display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;gap:14px;padding:14px 0;border-top:1px solid #E8E4DC"><span style="font:500 15px 'IBM Plex Sans',sans-serif;flex:1">Go Runtime и планировщик</span><span style="font:12px 'JetBrains Mono',monospace;color:#9A948A">25 вопросов</span></div>
+        <div style="display:flex;align-items:center;gap:14px;padding:14px 0;border-top:1px solid #E8E4DC"><span style="font:500 15px 'IBM Plex Sans',sans-serif;flex:1">Конкурентность</span><span style="font:12px 'JetBrains Mono',monospace;color:#9A948A">40 вопросов</span></div>
+        <div style="display:flex;align-items:center;gap:14px;padding:14px 0;border-top:1px solid #E8E4DC"><span style="font:500 15px 'IBM Plex Sans',sans-serif;flex:1">Память и GC</span><span style="font:12px 'JetBrains Mono',monospace;color:#9A948A">31 вопрос</span></div>
+        <div style="display:flex;align-items:center;gap:14px;padding:14px 0;border-top:1px solid #E8E4DC"><span style="font:500 15px 'IBM Plex Sans',sans-serif;flex:1">Сеть и HTTP</span><span style="font:12px 'JetBrains Mono',monospace;color:#9A948A">32 вопроса</span></div>
+        <div style="display:flex;align-items:center;gap:14px;padding:14px 0;border-top:1px solid #E8E4DC"><span style="font:500 15px 'IBM Plex Sans',sans-serif;flex:1">Базы данных и SQL</span><span style="font:12px 'JetBrains Mono',monospace;color:#9A948A">28 вопросов</span></div>
+        <div style="display:flex;align-items:center;gap:14px;padding:14px 0;border-top:1px solid #E8E4DC;border-bottom:1px solid #E8E4DC"><span style="font:500 15px 'IBM Plex Sans',sans-serif;flex:1">Лайвкодинг: Go и SQL</span><span style="font:12px 'JetBrains Mono',monospace;color:#9A948A">24 задачи</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid #E8E4DC">
+    <div style="max-width:760px;margin:0 auto;padding:72px 40px;display:flex;flex-direction:column;gap:28px">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font:600 11px 'JetBrains Mono',monospace;letter-spacing:.1em;color:#9A948A">FAQ</div>
+        <div style="font:700 32px/1.25 'PT Serif',Georgia,serif">Частые вопросы</div>
+      </div>
+      <div style="display:flex;flex-direction:column">
+        <div style="padding:18px 0;border-top:1px solid #E8E4DC;display:flex;flex-direction:column;gap:8px">
+          <div style="font:600 15px 'IBM Plex Sans',sans-serif">Чем это лучше конспекта вопросов с Хабра?</div>
+          <div style="font:14.5px/1.65 'IBM Plex Sans',sans-serif;color:#6B675E">Конспект вы читаете один раз. Здесь каждый вопрос возвращается по расписанию SM-2, ответы разложены по уровням глубины, а лайвкодинг идёт под таймером с тестами — как на секции.</div>
+        </div>
+        <div style="padding:18px 0;border-top:1px solid #E8E4DC;display:flex;flex-direction:column;gap:8px">
+          <div style="font:600 15px 'IBM Plex Sans',sans-serif">Сколько времени займёт подготовка?</div>
+          <div style="font:14.5px/1.65 'IBM Plex Sans',sans-serif;color:#6B675E">15–20 минут в день на вопросы и главы плюс 2–3 сессии лайвкодинга в неделю. При собеседовании через месяц-полтора — комфортный темп без марафонов по выходным.</div>
+        </div>
+        <div style="padding:18px 0;border-top:1px solid #E8E4DC;display:flex;flex-direction:column;gap:8px">
+          <div style="font:600 15px 'IBM Plex Sans',sans-serif">Я мидл — мне рано?</div>
+          <div style="font:14.5px/1.65 'IBM Plex Sans',sans-serif;color:#6B675E">Нет. Уровень middle в лестнице — отправная точка каждого ответа. Пройдёте программу — будете отвечать на senior-уровне: это и есть путь к следующему грейду и зарплатной вилке.</div>
+        </div>
+        <div style="padding:18px 0;border-top:1px solid #E8E4DC;border-bottom:1px solid #E8E4DC;display:flex;flex-direction:column;gap:8px">
+          <div style="font:600 15px 'IBM Plex Sans',sans-serif">Это платно?</div>
+          <div style="font:14.5px/1.65 'IBM Plex Sans',sans-serif;color:#6B675E">Сейчас — полностью бесплатно. Позже появится подписка на расширенную программу; всё открытое сейчас останется доступным.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid #E8E4DC;background:#26241F">
+    <div style="max-width:1080px;margin:0 auto;padding:76px 40px;display:flex;flex-direction:column;gap:20px;align-items:center;text-align:center">
+      <div style="font:700 36px/1.25 'PT Serif',Georgia,serif;color:#FAF9F7;text-wrap:balance;max-width:640px">Ваше следующее собеседование уже назначено. Вопрос в том, кто к нему готов.</div>
+      <div style="font:15px/1.6 'IBM Plex Sans',sans-serif;color:#A7A29A;max-width:440px">Начните с 15 минут сегодня — система сама выстроит план на завтра.</div>
+      <button style="font:500 15px 'IBM Plex Sans',sans-serif;color:#26241F;background:#FAF9F7;border:none;border-radius:999px;padding:14px 30px;cursor:pointer">Начать бесплатно</button>
+      <div style="font:12px 'IBM Plex Sans',sans-serif;color:#7C7871">Без карты · 156 вопросов и 24 задачи в бесплатной программе</div>
+    </div>
+    <div style="border-top:1px solid #3A3833">
+      <div style="max-width:1080px;margin:0 auto;padding:20px 40px;display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+        <div style="font:600 14px 'IBM Plex Sans',sans-serif;color:#FAF9F7">GoPrep<span style="color:#7C7871">_</span></div>
+        <div style="display:flex;gap:20px;font:12.5px 'IBM Plex Sans',sans-serif;color:#A7A29A"><span>Как это работает</span><span>Программа</span><span>FAQ</span><span>Телеграм</span></div>
+        <div style="margin-left:auto;font:11px 'JetBrains Mono',monospace;color:#7C7871">© 2026 GoPrep</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</x-dc>
+</body>
+</html>

@@ -1,0 +1,172 @@
+slug: pipelines-fanin
+topic: concurrency
+title: "Конвейеры: pipeline, fan-out и fan-in"
+minutes: 8
+tags: [pipeline, fan-in, channels]
+body_md: |
+  ## Зачем это знать
+
+  Конвейеры (pipelines) — любимая тема live-coding по конкурентности: «сделайте пайплайн из стадий», «распараллельте тяжёлую стадию», «смёржите N каналов в один», «не допустите утечки горутин при раннем выходе». За этими задачами стоят три кирпича — pipeline, fan-out и fan-in — плюс дисциплина владения каналами и распространения отмены. Разберём их так, чтобы на собеседовании вы не только написали рабочий merge, но и объяснили, кто закрывает каналы и почему горутины не текут.
+
+  ## Pipeline из стадий
+
+  Pipeline — цепочка стадий, соединённых каналами. Каждая стадия читает из входного канала, обрабатывает элемент, пишет в выходной. Первая стадия — generator, у неё нет входа, только выход. Правило владения: канал закрывает тот, кто в него пишет, — обычно через `defer close(out)`.
+
+  ```go
+  func gen(nums ...int) <-chan int {
+      out := make(chan int)
+      go func() {
+          defer close(out)
+          for _, n := range nums {
+              out <- n
+          }
+      }()
+      return out
+  }
+
+  func sq(in <-chan int) <-chan int {
+      out := make(chan int)
+      go func() {
+          defer close(out)
+          for n := range in {
+              out <- n * n
+          }
+      }()
+      return out
+  }
+  ```
+
+  <svg viewBox="0 0 720 128" role="img" aria-label="Pipeline из стадий: генератор, стадия возведения в квадрат и потребитель, соединённые каналами">
+    <defs>
+      <marker id="pp-arw1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+    </defs>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="30" y="40" width="130" height="54" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="95" y="72" text-anchor="middle">gen</text>
+      <rect x="230" y="40" width="150" height="54" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="305" y="72" text-anchor="middle">sq: n → n²</text>
+      <rect x="450" y="40" width="210" height="54" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="555" y="72" text-anchor="middle">потребитель: for range</text>
+    </g>
+    <path d="M160 67 L226 67" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#pp-arw1)"/>
+    <path d="M380 67 L446 67" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#pp-arw1)"/>
+    <text x="193" y="58" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#757575">chan int</text>
+    <text x="413" y="58" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#757575">chan int</text>
+    <text x="30" y="118" font-family="system-ui, sans-serif" font-size="13" fill="#757575">каждая стадия пишет в out и закрывает его: defer close(out)</text>
+  </svg>
+
+  Так стадии соединяются в конвейер: `for r := range sq(gen(2, 3, 4)) { ... }`. Направленные типы (`<-chan`, `chan<-`) не дают случайно нарушить направление потока.
+
+  ## Fan-out и fan-in
+
+  Если стадия — узкое место, её распараллеливают: несколько воркеров читают из одного и того же входного канала (fan-out), а их выходы объединяют обратно в один (fan-in). Каналы Go делают fan-out тривиальным: N горутин, читающих из одного канала, сами разбирают элементы без явного локинга.
+
+  <svg viewBox="0 0 720 232" role="img" aria-label="Fan-out на три воркера из одного входного канала и fan-in обратно в общий канал out через merge">
+    <defs>
+      <marker id="pp-arw2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+    </defs>
+    <text x="30" y="16" font-family="system-ui, sans-serif" font-size="13" fill="#757575">fan-out: N воркеров читают один канал (без локов)</text>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="24" y="88" width="96" height="54" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="72" y="120" text-anchor="middle">in</text>
+      <rect x="220" y="24" width="150" height="42" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="295" y="50" text-anchor="middle">worker 1</text>
+      <rect x="220" y="94" width="150" height="42" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="295" y="120" text-anchor="middle">worker 2</text>
+      <rect x="220" y="164" width="150" height="42" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="295" y="190" text-anchor="middle">worker 3</text>
+      <rect x="470" y="88" width="120" height="54" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="530" y="120" text-anchor="middle">merge</text>
+    </g>
+    <path d="M120 108 L216 46" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#pp-arw2)"/>
+    <path d="M120 115 L216 115" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#pp-arw2)"/>
+    <path d="M120 122 L216 184" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#pp-arw2)"/>
+    <path d="M370 46 L466 108" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#pp-arw2)"/>
+    <path d="M370 115 L466 115" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#pp-arw2)"/>
+    <path d="M370 184 L466 122" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#pp-arw2)"/>
+    <path d="M590 115 L662 115" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#pp-arw2)"/>
+    <text x="690" y="119" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#242424">out</text>
+    <text x="30" y="224" font-family="system-ui, sans-serif" font-size="13" fill="#757575">fan-in: merge через WaitGroup, close(out) после Wait()</text>
+  </svg>
+
+  Fan-in (merge) собирает несколько каналов в один. Классика — `sync.WaitGroup`: на каждый вход по горутине, копирующей его в общий `out`, и отдельная горутина, закрывающая `out` после `wg.Wait()`.
+
+  ```go
+  func merge(cs ...<-chan int) <-chan int {
+      out := make(chan int)
+      var wg sync.WaitGroup
+      wg.Add(len(cs))
+      for _, c := range cs {
+          go func(c <-chan int) {
+              defer wg.Done()
+              for v := range c {
+                  out <- v
+              }
+          }(c)
+      }
+      go func() { wg.Wait(); close(out) }()
+      return out
+  }
+  ```
+
+  На практике fan-out редко делают неограниченным: N выбирают по числу ядер или по внешнему лимиту (например, числу соединений к БД), иначе тысячи горутин задавят планировщик и downstream-стадию. Это уже worker pool — тот же fan-out, но с фиксированным N и, часто, буферизованным входным каналом-очередью.
+
+  ## Отмена через закрытие done
+
+  Проблема: если потребитель ушёл раньше (нашёл ответ, случилась ошибка), стадии-писатели зависнут на `out <- v`, потому что читателя больше нет, — и горутины утекут. Решение — общий сигнал отмены: канал `done` (или `ctx.Done()`), который закрывают один раз, а все стадии слушают в `select`.
+
+  <svg viewBox="0 0 720 202" role="img" aria-label="Распространение отмены: закрытие канала done широковещательно будит все стадии, каждая выходит из select">
+    <defs>
+      <marker id="pp-arw3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#B4552D"/>
+      </marker>
+    </defs>
+    <text x="30" y="16" font-family="system-ui, sans-serif" font-size="13" fill="#757575">отмена: один сигнал done на все стадии</text>
+    <rect x="280" y="26" width="160" height="46" rx="6" fill="none" stroke="#B4552D" stroke-width="2"/>
+    <text x="360" y="54" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#B4552D">close(done)</text>
+    <path d="M348 72 L131 106" fill="none" stroke="#B4552D" stroke-width="2" marker-end="url(#pp-arw3)"/>
+    <path d="M360 72 L360 106" fill="none" stroke="#B4552D" stroke-width="2" marker-end="url(#pp-arw3)"/>
+    <path d="M372 72 L589 106" fill="none" stroke="#B4552D" stroke-width="2" marker-end="url(#pp-arw3)"/>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#242424">
+      <rect x="24" y="110" width="210" height="56" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="129" y="143" text-anchor="middle">select: out&lt;-v | &lt;-done</text>
+      <rect x="255" y="110" width="210" height="56" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="360" y="143" text-anchor="middle">select: out&lt;-v | &lt;-done</text>
+      <rect x="486" y="110" width="210" height="56" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="591" y="143" text-anchor="middle">select: out&lt;-v | &lt;-done</text>
+    </g>
+    <text x="30" y="192" font-family="system-ui, sans-serif" font-size="13" fill="#757575">close(done) будит всех читателей разом → каждая стадия выходит из select</text>
+  </svg>
+
+  Закрытый канал немедленно разблокирует всех, кто из него читает, — это и есть широковещательный сигнал «стоп». Каждая стадия оборачивает отправку в `select`:
+
+  ```go
+  select {
+  case out <- v:
+  case <-done:
+      return       // отмена — выходим, не блокируясь
+  }
+  ```
+
+  С `context` тот же приём: `ctx.Done()` вместо `done`, а отмену инициирует `cancel()`. Важно вызвать `cancel()` (обычно `defer cancel()`) даже на успешном пути, иначе контекст и его горутины подтекут.
+
+  ## Типичные заблуждения
+
+  - «Каналы закрывает получатель» — нет, закрывает писатель или владелец; закрыть канал со стороны читателя или дважды — паника.
+  - «Достаточно запустить горутины, они сами завершатся» — нет: писатель без читателя блокируется навсегда, это и есть утечка; нужен `done`/`ctx`.
+  - «Fan-out требует мьютексов» — нет, конкурентное чтение из одного канала безопасно, распределение делает рантайм.
+  - «`merge` можно закрыть просто `close(out)` в конце» — только после `wg.Wait()` из отдельной горутины; иначе закроете, пока кто-то ещё пишет (паника).
+  - «`context` можно не отменять на success» — нужно всегда `defer cancel()`, иначе утечка.
+
+  ## Что отвечать на собеседовании
+
+  - Pipeline — стадии, соединённые каналами; писатель владеет выходным каналом и закрывает его через `defer close(out)`.
+  - Fan-out — N воркеров на один вход (без локов), fan-in — merge выходов через `WaitGroup` + закрытие `out` после `Wait`.
+  - Отмену пробрасывают закрытием `done`/`ctx.Done()`: закрытый канал будит всех читателей разом; отправку всегда оборачивают в `select` с `<-done`.
+  - Против утечек: на каждый `out <- v` — ветка отмены в `select`, и обязательный `defer cancel()` для `context`.
+related_questions: [pipeline-fanin-fanout, worker-pool-pattern, channels-buffered-ownership, context-cancellation-internals]
+related_tasks: [merge-channels, worker-pool-limits]

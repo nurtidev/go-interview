@@ -1,0 +1,116 @@
+slug: graceful-shutdown-service
+section: concurrency
+title: "Graceful shutdown HTTP-сервиса"
+tags: [shutdown, http]
+difficulty: senior
+question_md: |
+  Как корректно завершить HTTP-сервис на Go по SIGINT/SIGTERM, дав дожить
+  активным запросам? Покажите `main()` с `signal.NotifyContext`, `http.Server.
+  Shutdown`, таймаутом на shutdown и правильным порядком закрытия ресурсов. Какие
+  соединения `Shutdown` не закрывает?
+answer_levels:
+  - level: middle
+    text_md: |
+      Graceful shutdown — это прекратить приём новых запросов, дать текущим
+      завершиться и только потом выйти. Сигналы ОС ловят через
+      `signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)` — контекст
+      отменяется при сигнале. У `http.Server` есть метод `Shutdown(ctx)`: он
+      закрывает слушающие сокеты, перестаёт принимать новые соединения и ждёт
+      завершения активных, пока не истечёт переданный `ctx`. На сам shutdown
+      вешают `context.WithTimeout`, чтобы не ждать зависшие запросы вечно. Порядок:
+      сначала останавливаем входящий трафик (`Shutdown`), потом закрываем БД,
+      очереди и прочие ресурсы.
+  - level: senior
+    text_md: |
+      Идиома: `signal.NotifyContext` для сигнала и отдельный `context.WithTimeout`
+      для дедлайна дренирования. `ListenAndServe` запускают в горутине, основной
+      поток ждёт отмены контекста, затем вызывает `Shutdown`.
+
+      ```go
+      package main
+
+      import (
+          "context"
+          "errors"
+          "log"
+          "net/http"
+          "os/signal"
+          "syscall"
+          "time"
+      )
+
+      func main() {
+          ctx, stop := signal.NotifyContext(context.Background(),
+              syscall.SIGINT, syscall.SIGTERM)
+          defer stop()
+
+          srv := &http.Server{Addr: ":8080", Handler: newHandler()}
+
+          go func() {
+              if err := srv.ListenAndServe(); err != nil &&
+                  !errors.Is(err, http.ErrServerClosed) {
+                  log.Fatalf("listen: %v", err)
+              }
+          }()
+          log.Println("server started")
+
+          <-ctx.Done() // пришёл SIGINT/SIGTERM
+          stop()       // вернуть сигналы дефолтному обработчику (второй Ctrl+C убьёт)
+          log.Println("shutting down")
+
+          shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+          defer cancel()
+
+          if err := srv.Shutdown(shutdownCtx); err != nil {
+              log.Printf("graceful shutdown failed: %v", err) // дедлайн истёк
+              _ = srv.Close()                                 // жёстко рвём остаток
+          }
+          // порядок: сперва входящий трафик остановлен, теперь ресурсы
+          closeDB()
+          drainQueues()
+          log.Println("bye")
+      }
+
+      func newHandler() http.Handler { return http.NewServeMux() }
+      func closeDB()                  {}
+      func drainQueues()              {}
+      ```
+
+      Для нескольких компонентов (HTTP + gRPC + воркеры) удобен `errgroup`: одна
+      горутина `g.Go` ждёт `ctx.Done()` и вызывает `Shutdown`, другая держит
+      `ListenAndServe`; `g.Wait()` собирает итог. Возврат `stop()` вторым вызовом
+      важен: он снимает перехват сигналов, чтобы повторный Ctrl+C убил
+      подвисший процесс принудительно.
+  - level: deep
+    text_md: |
+      Что `Shutdown` НЕ делает: он не трогает hijacked-соединения (WebSocket,
+      `http.Hijacker`) и не прерывает уже запущенные handler'ы — он лишь ждёт,
+      пока они сами вернутся, и закрывает idle keep-alive соединения. Для
+      WebSocket нужен свой механизм: разослать клиентам close-frame, отменить
+      контексты соединений, дождаться. Активные стриминговые ответы (SSE, long
+      polling) тоже надо завершать вручную по сигналу отмены, иначе они держат
+      соединение до таймаута shutdown.
+
+      `Shutdown` работает так: помечает сервер закрытым (новые `Accept` получают
+      `ErrServerClosed`), закрывает все listeners, затем в цикле опрашивает число
+      активных соединений с нарастающей паузой (до ~500ms между опросами), пока не
+      станет ноль или не истечёт `ctx`. Поэтому дедлайн shutdown стоит согласовать
+      с самым долгим ожидаемым запросом. `RegisterOnShutdown` даёт колбэки для
+      перевода соединений в закрытие. Между `Shutdown` и `Close` разница
+      принципиальна: `Close` немедленно рвёт все соединения, включая активные, —
+      это аварийный путь по истечении дедлайна.
+
+      Порядок закрытия критичен для отсутствия ошибок «в полёте»: (1) снять
+      readiness-пробу в оркестраторе, чтобы балансировщик перестал слать трафик
+      (в Kubernetes — preStop hook + graceful termination period больше, чем
+      shutdown timeout); (2) `Shutdown` HTTP; (3) дождаться воркеров/консьюмеров;
+      (4) закрыть пулы БД и продюсеры очередей — последними, ведь handler'ы могли
+      ими пользоваться до последнего момента. Частая ошибка — закрыть БД до
+      `Shutdown`: активные запросы упадут. В Kubernetes также важно, что SIGTERM
+      приходит одновременно с удалением из endpoints, но распространение занимает
+      время, поэтому небольшой `sleep`/preStop перед `Shutdown` устраняет гонку с
+      балансировщиком.
+follow_ups:
+  - "Почему Shutdown не закрывает WebSocket-соединения и как их завершать корректно?"
+  - "Как согласовать shutdown timeout с terminationGracePeriodSeconds и preStop в Kubernetes?"
+  - "Зачем повторно вызывать stop() из signal.NotifyContext после получения сигнала?"

@@ -1,0 +1,10 @@
+slug: broken-task
+kind: go
+title: "Broken (no test_code)"
+difficulty: middle
+statement_md: |
+  This go task is missing test_code, so it must be skipped by the loader.
+starter_code: |
+  package main
+
+  func main() {}

@@ -1,0 +1,101 @@
+import { useState, type FormEvent } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { ApiError } from '@/lib/api'
+import { useAuth } from '@/lib/auth'
+
+export default function RegisterPage() {
+  const { register } = useAuth()
+  const navigate = useNavigate()
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault()
+    setError(null)
+
+    if (password.length < 8) {
+      setError('Пароль должен быть не менее 8 символов')
+      return
+    }
+
+    setLoading(true)
+    try {
+      await register(email, password)
+      navigate('/', { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setError('Этот email уже занят')
+      } else if (err instanceof ApiError && err.status === 400) {
+        setError('Пароль должен быть не менее 8 символов')
+      } else if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Не удалось зарегистрироваться. Попробуйте ещё раз.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="flex min-h-svh items-center justify-center bg-bg px-5 py-16">
+      <div className="flex w-full max-w-[340px] flex-col gap-[22px]">
+        <div className="flex flex-col items-center gap-2">
+          <div className="text-[22px] font-semibold text-ink">
+            GoPrep<span className="text-ink-3">_</span>
+          </div>
+          <p className="text-center text-[13.5px] leading-relaxed text-ink-2">
+            Спортзал для собеседований Senior Go
+          </p>
+        </div>
+
+        <form className="flex flex-col gap-3" onSubmit={handleSubmit}>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="email" className="text-[12.5px] text-ink-2">
+              Email
+            </Label>
+            <Input
+              id="email"
+              type="email"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="password" className="text-[12.5px] text-ink-2">
+              Пароль
+            </Label>
+            <Input
+              id="password"
+              type="password"
+              required
+              minLength={8}
+              autoComplete="new-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+            <p className="text-[11px] text-ink-3">Не менее 8 символов</p>
+          </div>
+          {error && <p className="text-[12.5px] text-err">{error}</p>}
+          <Button type="submit" size="lg" className="mt-1 w-full" disabled={loading}>
+            {loading ? 'Регистрируем…' : 'Зарегистрироваться'}
+          </Button>
+        </form>
+
+        <p className="text-center text-[12.5px] text-ink-2">
+          Уже есть аккаунт?{' '}
+          <Link to="/login" className="font-medium text-ink transition-colors hover:text-accent-hover">
+            Войти
+          </Link>
+        </p>
+      </div>
+    </div>
+  )
+}

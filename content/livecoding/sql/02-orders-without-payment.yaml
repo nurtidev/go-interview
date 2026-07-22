@@ -1,0 +1,84 @@
+slug: orders-without-payment
+kind: sql
+title: "Заказы без оплаты"
+difficulty: middle
+tags: [left-join, anti-join, null]
+statement_md: |
+  Есть таблица заказов `orders` и таблица платежей `payments` (один заказ может
+  быть оплачен, а может и нет). Найдите все заказы, по которым **нет ни одного
+  платежа**.
+
+  Верните два столбца: `id` — идентификатор заказа и `amount` — его сумму.
+  Отсортируйте по `id` по возрастанию.
+starter_code: |
+  -- Верните id и amount заказов, у которых нет платежей.
+  SELECT ...
+hints:
+  - "Нужны заказы, для которых в payments нет соответствующей строки. Это анти-join: строки одной таблицы, у которых нет пары в другой."
+  - "Один способ — LEFT JOIN orders к payments по order_id: у неоплаченных заказов все столбцы из payments окажутся NULL."
+  - "После LEFT JOIN отфильтруйте строки, где ключ из payments IS NULL (например, p.id IS NULL). Эквивалент — NOT EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id)."
+solution_md: |
+  ### Идея
+
+  Классический анти-join. Делаем `LEFT JOIN` от `orders` к `payments` по
+  `order_id`: для заказов без платежей все столбцы из `payments` будут `NULL`.
+  Оставляем такие строки условием `p.id IS NULL`.
+
+  Эквивалентная и часто более читаемая формулировка — через `NOT EXISTS`.
+
+  ### Эталонный запрос
+
+  ```sql
+  SELECT o.id, o.amount
+  FROM orders o
+  LEFT JOIN payments p ON p.order_id = o.id
+  WHERE p.id IS NULL
+  ORDER BY o.id;
+  ```
+
+  Вариант через `NOT EXISTS`:
+
+  ```sql
+  SELECT o.id, o.amount
+  FROM orders o
+  WHERE NOT EXISTS (
+    SELECT 1 FROM payments p WHERE p.order_id = o.id
+  )
+  ORDER BY o.id;
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Проверять на `NULL` через `= NULL` вместо `IS NULL` — условие всегда ложно.
+  - Ставить условие фильтра в `ON` вместо `WHERE` — при LEFT JOIN это меняет смысл и вернёт все заказы.
+  - Использовать `NOT IN (SELECT order_id FROM payments)` — если в подзапросе встретится `NULL`, результат станет пустым (ловушка трёхзначной логики).
+schema_sql: |
+  CREATE TABLE orders (
+    id       INTEGER PRIMARY KEY,
+    customer TEXT NOT NULL,
+    amount   INTEGER NOT NULL
+  );
+  CREATE TABLE payments (
+    id       INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL,
+    paid     INTEGER NOT NULL
+  );
+seed_sql: |
+  INSERT INTO orders (id, customer, amount) VALUES
+    (1, 'Alice', 100),
+    (2, 'Bob',   200),
+    (3, 'Carol', 300),
+    (4, 'Dave',  400),
+    (5, 'Eve',   500),
+    (6, 'Frank', 600);
+  INSERT INTO payments (id, order_id, paid) VALUES
+    (1, 1, 100),
+    (2, 3, 300),
+    (3, 5, 500);
+expected:
+  columns: [id, amount]
+  rows:
+    - ["2", "200"]
+    - ["4", "400"]
+    - ["6", "600"]
+  order_matters: true

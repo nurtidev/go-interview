@@ -1,0 +1,96 @@
+slug: find-remove-duplicates
+kind: sql
+title: "Поиск дубликатов по бизнес-ключу"
+difficulty: middle
+tags: [duplicates, group-by, self-join]
+statement_md: |
+  В таблице `users` (`id`, `email`, `name`) из-за бага завелись дубли: один и тот
+  же `email` встречается у нескольких строк. Нужно оставить по одной строке на
+  каждый `email` — ту, у которой **наименьший `id`** (самая ранняя запись), а
+  остальные считать дубликатами на удаление.
+
+  Верните строки, которые нужно **удалить**: два столбца `id` и `email`.
+  Отсортируйте по `id` по возрастанию.
+starter_code: |
+  -- Верните id и email строк-дубликатов (все, кроме строки с минимальным id в каждом email).
+  SELECT ...
+hints:
+  - "Дубликат по бизнес-ключу — это email, встречающийся больше одного раза. Сначала мысленно определите, какую строку в группе оставляем: с минимальным id."
+  - "Для каждой строки нужно понять, есть ли в её группе email строка с меньшим id. Это делается коррелированным подзапросом MIN(id) по тому же email или оконной функцией ROW_NUMBER() OVER (PARTITION BY email ORDER BY id)."
+  - "Строка идёт на удаление, если её id больше минимального id в своей группе email: WHERE id > (SELECT MIN(id) FROM users u2 WHERE u2.email = u.email). Оконный вариант: rn > 1."
+solution_md: |
+  ### Идея
+
+  «Оставить одну, удалить остальные» сводится к правилу выбора «эталонной» строки
+  в каждой группе бизнес-ключа. Здесь эталон — строка с **минимальным `id`** внутри
+  каждого `email`. Значит, на удаление идут все строки, у которых `id` **больше**
+  минимального `id` в своей группе.
+
+  Два стандартных способа: коррелированный подзапрос с `MIN(id)` или оконная
+  функция `ROW_NUMBER()` с разбиением по `email` — первой (`rn = 1`) достаётся
+  минимальный `id`, остальные (`rn > 1`) удаляем.
+
+  ### Эталонный запрос
+
+  ```sql
+  -- Вариант 1: коррелированный подзапрос
+  SELECT id, email
+  FROM users u
+  WHERE id > (SELECT MIN(id) FROM users u2 WHERE u2.email = u.email)
+  ORDER BY id;
+
+  -- Вариант 2: оконная функция (тот же результат)
+  WITH ranked AS (
+    SELECT id, email,
+           ROW_NUMBER() OVER (PARTITION BY email ORDER BY id) AS rn
+    FROM users
+  )
+  SELECT id, email
+  FROM ranked
+  WHERE rn > 1
+  ORDER BY id;
+  ```
+
+  Само удаление после того, как строки найдены:
+
+  ```sql
+  DELETE FROM users
+  WHERE id NOT IN (SELECT MIN(id) FROM users GROUP BY email);
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Вернуть только сам факт наличия дублей (`GROUP BY email HAVING COUNT(*) > 1`)
+    вместо конкретных строк на удаление — это лишь список проблемных email, а не
+    id, которые нужно удалить.
+  - Удалить **все** строки дублирующегося email, не оставив ни одной — теряются
+    данные; нужно сохранить эталон (`MIN(id)`).
+  - Использовать `NOT IN` с подзапросом, где возможны `NULL` — тогда результат
+    может внезапно стать пустым; при выборе эталона по `MIN(id)` это безопасно,
+    но про ловушку `NOT IN`/`NULL` спрашивают.
+  - Забыть детерминированное правило выбора эталона (min/max id, последняя дата) —
+    без него непонятно, какую из одинаковых строк оставлять.
+schema_sql: |
+  CREATE TABLE users (
+    id    INTEGER PRIMARY KEY,
+    email TEXT NOT NULL,
+    name  TEXT NOT NULL
+  );
+seed_sql: |
+  INSERT INTO users (id, email, name) VALUES
+    (1, 'alice@example.com', 'Alice'),
+    (2, 'bob@example.com',   'Bob'),
+    (3, 'alice@example.com', 'Alice A.'),
+    (4, 'carol@example.com', 'Carol'),
+    (5, 'bob@example.com',   'Bobby'),
+    (6, 'alice@example.com', 'Ally'),
+    (7, 'dave@example.com',  'Dave'),
+    (8, 'carol@example.com', 'Caroline');
+expected:
+  columns: [id, email]
+  rows:
+    - ["3", "alice@example.com"]
+    - ["5", "bob@example.com"]
+    - ["6", "alice@example.com"]
+    - ["8", "carol@example.com"]
+  order_matters: true

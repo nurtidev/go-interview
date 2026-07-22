@@ -1,0 +1,7 @@
+# This fixture is intentionally invalid: it is missing the required "slug"
+# field, so Load must log a warning and skip it.
+section: go-internals
+title: "Файл без slug"
+difficulty: senior
+question_md: |
+  Этот файл должен быть пропущен загрузчиком.

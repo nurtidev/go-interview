@@ -1,0 +1,146 @@
+slug: linux-for-go-services
+topic: os
+title: "Linux глазами Go-сервиса"
+minutes: 9
+tags: [linux, runtime, cgroups, epoll]
+body_md: |
+  ## Зачем это знать
+
+  Go-сервис не живёт в вакууме — он процесс в Linux, и всё, что даёт язык (горутины, GC, netpoller), в итоге ложится на примитивы ядра: потоки, системные вызовы, epoll, cgroups. На staff-собеседовании проверяют именно этот стык: почему `GOMAXPROCS` в контейнере надо настраивать, куда «уходит» горутина при `conn.Read`, почему OOM-killer убивает под, хотя в Go есть сборщик мусора. Кто видит границу «рантайм ↔ ядро», тот диагностирует проблемы в проде, а не гадает по логам.
+
+  ## Процесс, потоки, горутины: модель M:N
+
+  Для ядра ваш сервис — один процесс: один PID, одно виртуальное адресное пространство. Внутри процесс запускает несколько потоков ОС (в терминах Go — M). Планирует эти потоки по ядрам само ядро Linux, вытесняюще (preemptive).
+
+  Горутины ядро не видит вообще. Их планирует рантайм Go в user space, мультиплексируя тысячи горутин на небольшое число потоков — это модель **M:N** (N горутин на M потоков). Поэтому переключение горутины дешёвое (без перехода в ядро, только смена регистров и стека), а переключение потока дорогое (системный вызов, работа планировщика ядра, сброс кэшей). Число потоков, одновременно исполняющих Go-код, ограничено `GOMAXPROCS`.
+
+  <svg viewBox="0 0 720 290" role="img" aria-label="Модель M к N: внутри одного процесса тысячи горутин планируются рантаймом Go на несколько потоков ОС, а потоки планируются ядром на ядра CPU">
+  <defs>
+  <marker id="n10a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#6B675E"/>
+  </marker>
+  </defs>
+  <rect x="16" y="18" width="688" height="258" rx="8" fill="none" stroke="#26241F" stroke-width="1.5"/>
+  <text x="32" y="40" font-family="system-ui, sans-serif" font-size="14" fill="#26241F">Процесс · один PID · общее адресное пространство</text>
+  <text x="360" y="64" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#6B675E">горутины (G): тысячи, планирует рантайм Go</text>
+  <circle cx="70" cy="82" r="11" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <circle cx="150" cy="82" r="11" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <circle cx="230" cy="82" r="11" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <circle cx="310" cy="82" r="11" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <circle cx="390" cy="82" r="11" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <circle cx="470" cy="82" r="11" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <circle cx="550" cy="82" r="11" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <circle cx="630" cy="82" r="11" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <line x1="72" y1="93" x2="150" y2="124" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <line x1="150" y1="93" x2="162" y2="124" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <line x1="230" y1="93" x2="345" y2="124" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <line x1="310" y1="93" x2="358" y2="124" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <line x1="388" y1="93" x2="372" y2="124" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <line x1="470" y1="93" x2="545" y2="124" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <line x1="550" y1="93" x2="555" y2="124" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <line x1="630" y1="93" x2="568" y2="124" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <rect x="90" y="126" width="150" height="44" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="165" y="153" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">M · поток ОС</text>
+  <rect x="285" y="126" width="150" height="44" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="360" y="153" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">M · поток ОС</text>
+  <rect x="480" y="126" width="150" height="44" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="555" y="153" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">M · поток ОС</text>
+  <line x1="165" y1="170" x2="165" y2="204" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <line x1="360" y1="170" x2="360" y2="204" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <line x1="555" y1="170" x2="555" y2="204" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10a)"/>
+  <rect x="110" y="206" width="110" height="40" rx="6" fill="#F7EEDA" stroke="#26241F" stroke-width="1.5"/>
+  <text x="165" y="230" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">ядро CPU</text>
+  <rect x="305" y="206" width="110" height="40" rx="6" fill="#F7EEDA" stroke="#26241F" stroke-width="1.5"/>
+  <text x="360" y="230" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">ядро CPU</text>
+  <rect x="500" y="206" width="110" height="40" rx="6" fill="#F7EEDA" stroke="#26241F" stroke-width="1.5"/>
+  <text x="555" y="230" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">ядро CPU</text>
+  <text x="360" y="266" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">M:N — переключение горутины дёшево (user space), потока — дорого (ядро)</text>
+  </svg>
+
+  ## epoll и netpoller: как горутина спит на сокете
+
+  Самое частое «магическое» место — сетевой I/O. Когда горутина делает `conn.Read()`, а данных в сокете нет, наивная реализация заблокировала бы поток в системном вызове. Go так не делает.
+
+  Рантайм переводит сокет в неблокирующий режим и регистрирует его дескриптор в epoll — это и есть netpoller. Горутина паркуется (`gopark`): снимается с потока, а поток M свободен и берёт другую работу. Когда пакет доходит до сетевой карты и ядро кладёт данные в сокет, epoll помечает дескриптор готовым. Планировщик Go периодически (и при простое) зовёт `epoll_wait`, получает список готовых дескрипторов и делает соответствующие горутины runnable (`goready`). Горутина просыпается, и `Read` возвращает данные — как будто он и не блокировался.
+
+  Итог: блокирующий по виду код держит десятки тысяч соединений на горстке потоков. Именно поэтому «поток на соединение», как в старом C-сервере, в Go не нужен.
+
+  <svg viewBox="0 0 720 300" role="img" aria-label="Жизненный цикл чтения из сокета: горутина зовёт Read без данных, паркуется с регистрацией в epoll, поток свободен; приходит пакет, netpoller через epoll_wait будит горутину, и Read возвращает данные">
+  <defs>
+  <marker id="n10b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#6B675E"/>
+  </marker>
+  </defs>
+  <rect x="30" y="36" width="280" height="56" rx="6" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="46" y="60" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">1 · Горутина: conn.Read()</text>
+  <text x="46" y="80" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">буфер сокета пуст</text>
+  <rect x="30" y="118" width="280" height="56" rx="6" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="46" y="142" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">2 · gopark: горутина паркуется</text>
+  <text x="46" y="162" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">fd → epoll; поток M свободен</text>
+  <rect x="410" y="118" width="280" height="56" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="426" y="142" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">3 · Пакет: NIC → ядро</text>
+  <text x="426" y="162" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">данные в сокете, epoll: fd готов</text>
+  <rect x="410" y="200" width="280" height="56" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="426" y="224" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">4 · netpoller: epoll_wait</text>
+  <text x="426" y="244" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">fd готов → goready(G)</text>
+  <rect x="30" y="200" width="280" height="56" rx="6" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="46" y="224" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">5 · Горутина снова runnable</text>
+  <text x="46" y="244" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">Read() возвращает байты</text>
+  <line x1="170" y1="92" x2="170" y2="116" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10b)"/>
+  <line x1="312" y1="146" x2="408" y2="146" stroke="#6B675E" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#n10b)"/>
+  <text x="360" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">ждём в epoll</text>
+  <line x1="550" y1="174" x2="550" y2="198" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10b)"/>
+  <line x1="408" y1="228" x2="312" y2="228" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n10b)"/>
+  <text x="360" y="222" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">goready</text>
+  <text x="46" y="188" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">поток M тем временем выполняет другие горутины</text>
+  <text x="30" y="286" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">Блокирующий с виду Read — неблокирующий для планировщика: тысячи соединений на горстке потоков.</text>
+  </svg>
+
+  Оговорка: через netpoller проходит сетевой I/O, но не всё. Обычные файловые операции и блокирующие системные вызовы (а также вызовы в C через cgo) реально блокируют поток. Рантайм это замечает и, чтобы `GOMAXPROCS` логических процессоров не простаивали, поднимает дополнительные потоки M. Поэтому в `/proc/<pid>/status` (поле `Threads`) потоков нередко больше, чем `GOMAXPROCS`, — это нормально, но лавина блокирующих вызовов может расплодить тысячи потоков (жёсткий предел — `runtime/debug.SetMaxThreads`, по умолчанию 10000).
+
+  ## Контейнер — это не виртуалка: cgroups и namespaces
+
+  Контейнер — это тот же процесс на том же ядре хоста, просто с двумя ограничениями. **Namespaces** дают изоляцию видимости: свой PID (внутри процесс — PID 1), свой сетевой стек, своя файловая система — процесс «думает», что он один в системе. **Cgroups** дают лимиты ресурсов: сколько CPU (quota) и памяти можно.
+
+  И тут классическая ловушка. Go-рантайм при старте определяет `GOMAXPROCS` через системный вызов `sched_getaffinity` — а тот возвращает ядра хоста, не cgroup-квоту. На 16-ядерном хосте с квотой в 2 ядра рантайм по умолчанию поставит `GOMAXPROCS=16`: лишние потоки, борьба за 2 реальных ядра, CPU-троттлинг и рост latency-хвостов. Фикс — библиотека `automaxprocs` (читает cgroup-квоту) или явный `GOMAXPROCS`. С Go 1.25 рантайм умеет учитывать cgroup-лимит сам, но на многих продах ещё живёт старое поведение — знать про это обязательно.
+
+  Симметрично по памяти: GC не знает про `memory.limit` из cgroup и может раздуть кучу до OOM-kill. Лечится `GOMEMLIMIT` — мягким лимитом, при приближении к которому GC работает агрессивнее. Ставьте его чуть ниже cgroup-лимита (примерно 90%).
+
+  <svg viewBox="0 0 720 300" role="img" aria-label="Контейнер как процесс на ядре хоста: namespaces изолируют видимость, cgroups задают лимиты CPU и памяти; Go-рантайм по умолчанию видит ядра хоста, а не квоту, поэтому GOMAXPROCS и GOMEMLIMIT нужно настраивать">
+  <rect x="20" y="20" width="680" height="210" rx="8" fill="none" stroke="#26241F" stroke-width="1.5"/>
+  <text x="36" y="42" font-family="system-ui, sans-serif" font-size="13" fill="#6B675E">Хост · ядро Linux · 16 vCPU · 64 ГБ RAM</text>
+  <rect x="48" y="58" width="380" height="150" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="64" y="80" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">Контейнер = namespaces + cgroups</text>
+  <rect x="72" y="100" width="332" height="92" rx="6" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="238" y="128" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#26241F">Go-процесс</text>
+  <text x="238" y="150" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">sched_getaffinity →</text>
+  <text x="238" y="170" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#BE4238">видит 16 ядер ХОСТА, не квоту</text>
+  <rect x="452" y="58" width="228" height="70" rx="6" fill="#F7EEDA" stroke="#26241F" stroke-width="1.5"/>
+  <text x="466" y="82" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">cgroups · лимиты</text>
+  <text x="466" y="102" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">CPU quota = 2 ядра</text>
+  <text x="466" y="120" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">memory.limit = 512 МБ</text>
+  <rect x="452" y="138" width="228" height="70" rx="6" fill="#F7EEDA" stroke="#26241F" stroke-width="1.5"/>
+  <text x="466" y="162" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">namespaces · видимость</text>
+  <text x="466" y="182" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">свой PID 1, свой netstack</text>
+  <text x="466" y="200" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">своя файловая система</text>
+  <rect x="20" y="242" width="680" height="50" rx="6" fill="#EDEAE3" stroke="#BE4238" stroke-width="1.5"/>
+  <text x="36" y="264" font-family="system-ui, sans-serif" font-size="13" fill="#BE4238">По умолчанию GOMAXPROCS = 16 (ядра хоста), не 2 → троттлинг и latency-хвосты.</text>
+  <text x="36" y="283" font-family="system-ui, sans-serif" font-size="12" fill="#26241F">Фикс: automaxprocs / GOMAXPROCS=2 и GOMEMLIMIT ≈ 460 МБ против OOM-kill.</text>
+  </svg>
+
+  ## Типичные заблуждения
+
+  - **«Горутина — это лёгкий поток ОС».** Нет, ядро о ней не знает; это структура рантайма, планируемая в user space поверх потоков.
+  - **«В контейнере Go сам видит лимит CPU».** По умолчанию до Go 1.25 — нет: видит ядра хоста, отсюда неверный `GOMAXPROCS`.
+  - **«Есть GC — значит OOM невозможен».** Возможен: без `GOMEMLIMIT` куча может перерасти cgroup-лимит, и под убьёт OOM-killer.
+  - **«`conn.Read` блокирует поток ОС».** Нет: горутина паркуется через netpoller, поток свободен для других горутин.
+  - **«Контейнер — это лёгкая виртуалка».** Нет, это обычный процесс ядра хоста, ограниченный cgroups и изолированный namespaces.
+
+  ## Что отвечать на собеседовании
+
+  - Разложите три уровня: **процесс** (PID, адресное пространство) → **потоки ОС M** (планирует ядро) → **горутины** (планирует рантайм, модель M:N) и почему переключение горутины дешевле переключения потока.
+  - Объясните **netpoller**: сокет в epoll, `gopark` горутины, `epoll_wait` и `goready` — как Go держит тысячи соединений без потока на каждое.
+  - Про контейнер: **namespaces** (видимость) против **cgroups** (лимиты); ловушка `GOMAXPROCS` = ядра хоста и фикс `automaxprocs`/`GOMAXPROCS`, плюс `GOMEMLIMIT` против OOM.
+  - Свяжите с прод-симптомами: троттлинг и latency-хвосты — часто неверный `GOMAXPROCS`; внезапный OOM-kill — отсутствие `GOMEMLIMIT`.
+related_questions: [processes-threads-goroutines, epoll-io-uring-netpoller, cgroups-namespaces-containers, signals-sigterm-pid1-zombies]
+related_tasks: [worker-pool-limits]

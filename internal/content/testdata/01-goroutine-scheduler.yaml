@@ -1,0 +1,24 @@
+slug: goroutine-scheduler-gmp
+section: go-internals
+title: "Как устроен планировщик горутин (GMP)?"
+difficulty: senior
+tags: [runtime, scheduler]
+question_md: |
+  Опиши модель GMP планировщика Go. Что такое G, M и P и как они
+  взаимодействуют? Что происходит при блокирующем системном вызове?
+answer_levels:
+  - level: middle
+    text_md: |
+      G — горутина, M — OS-поток, P — логический процессор (контекст исполнения).
+      Число P задаётся GOMAXPROCS.
+  - level: senior
+    text_md: |
+      P владеет локальной очередью G. M исполняет G, только держа P. При блокирующем
+      syscall M и G отвязываются от P, чтобы другой M мог продолжить работу.
+  - level: deep
+    text_md: |
+      Есть work-stealing из чужих очередей и глобальная очередь, sysmon для
+      preemption и netpoller для сетевых операций.
+follow_ups:
+  - "Что такое work-stealing?"
+  - "Как работает асинхронная вытесняющая многозадачность с Go 1.14?"

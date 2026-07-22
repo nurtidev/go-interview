@@ -1,0 +1,21 @@
+slug: go-memory-model-happens-before
+section: concurrency
+title: "Модель памяти Go и отношение happens-before"
+difficulty: staff
+tags: [memory-model, concurrency, channels]
+question_md: |
+  Что гарантирует модель памяти Go? Объясни отношение happens-before на примере
+  каналов и sync-примитивов.
+answer_levels:
+  - level: senior
+    text_md: |
+      Модель памяти описывает, при каких условиях чтение переменной увидит запись,
+      сделанную в другой горутине. Отправка в канал happens-before завершения
+      соответствующего приёма.
+  - level: deep
+    text_md: |
+      Закрытие канала happens-before приёма нулевого значения из-за закрытия.
+      Unlock мьютекса happens-before последующего Lock. Без синхронизации гонки —
+      неопределённое поведение.
+follow_ups:
+  - "Почему data race — это undefined behaviour, а не просто устаревшее значение?"

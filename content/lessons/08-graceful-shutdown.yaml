@@ -1,0 +1,114 @@
+slug: graceful-shutdown
+topic: concurrency
+title: "Graceful shutdown сервиса"
+minutes: 8
+tags: [shutdown, context, http]
+body_md: |
+  ## Зачем это знать
+
+  В облаке процесс не живёт вечно: оркестратор в любой момент присылает SIGTERM — при деплое, масштабировании, эвикте ноды. Если сервис на этот сигнал просто падает, то рвутся запросы в полёте, не докатываются транзакции, теряются сообщения из очереди. Graceful shutdown — это умение остановиться аккуратно: перестать принимать новое, дать текущему доработать и только потом выйти. На собеседовании по concurrency это любимый практический вопрос — он проверяет и знание `context`, и понимание порядка остановки ресурсов, и внимание к деталям вроде «что `Shutdown` НЕ закрывает». Ошибка в порядке закрытия — классическая причина ошибок «в полёте» на проде.
+
+  ## Последовательность остановки
+
+  Корректная остановка — это конвейер из четырёх шагов, а не одно действие. Сигнал ОС ловят через `signal.NotifyContext`, который отменяет контекст при SIGINT/SIGTERM. Дальше — остановка приёма, дренаж активных запросов под дедлайном и закрытие ресурсов.
+
+  <svg viewBox="0 0 720 210" role="img" aria-label="Последовательность graceful shutdown: сигнал, остановка приёма новых соединений, дренаж активных запросов под таймаутом, закрытие ресурсов">
+  <defs>
+  <marker id="s81" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#0D7680"/>
+  </marker>
+  </defs>
+  <rect x="24" y="40" width="150" height="70" rx="6" fill="none" stroke="#B4552D"/>
+  <text x="99" y="70" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#B4552D">1 · SIGTERM</text>
+  <text x="99" y="92" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">NotifyContext</text>
+  <rect x="196" y="40" width="150" height="70" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="271" y="70" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">2 · стоп приёма</text>
+  <text x="271" y="92" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">закрыть listeners</text>
+  <rect x="368" y="40" width="150" height="70" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="443" y="70" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">3 · дренаж</text>
+  <text x="443" y="92" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">ждём активные</text>
+  <rect x="540" y="40" width="156" height="70" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="618" y="70" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">4 · ресурсы</text>
+  <text x="618" y="92" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">БД, очереди</text>
+  <line x1="176" y1="75" x2="194" y2="75" stroke="#0D7680" marker-end="url(#s81)"/>
+  <line x1="348" y1="75" x2="366" y2="75" stroke="#0D7680" marker-end="url(#s81)"/>
+  <line x1="520" y1="75" x2="538" y2="75" stroke="#0D7680" marker-end="url(#s81)"/>
+  <text x="443" y="160" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#B4552D">на шаг 3 — таймаут (context.WithTimeout): по дедлайну → Close (жёстко)</text>
+  <text x="360" y="188" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">порядок важен: БД закрываем ПОСЛЕ дренажа — её ещё используют хендлеры</text>
+  </svg>
+
+  У `http.Server` для этого есть `Shutdown(ctx)`: он закрывает слушающие сокеты, перестаёт принимать новые соединения, закрывает idle keep-alive и **ждёт**, пока активные хендлеры сами вернутся, — но не дольше, чем позволит переданный контекст. Отсюда идиома:
+
+  ```go
+  ctx, stop := signal.NotifyContext(context.Background(),
+      syscall.SIGINT, syscall.SIGTERM)
+  defer stop()
+
+  go func() {
+      if err := srv.ListenAndServe(); err != nil &&
+          !errors.Is(err, http.ErrServerClosed) {
+          log.Fatalf("listen: %v", err)
+      }
+  }()
+
+  <-ctx.Done() // пришёл сигнал
+  stop()       // вернуть сигналы дефолту: второй Ctrl+C убьёт зависший процесс
+
+  shCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+  defer cancel()
+  if err := srv.Shutdown(shCtx); err != nil {
+      _ = srv.Close() // дедлайн истёк — рвём остаток жёстко
+  }
+  closeDB() // ПОСЛЕ Shutdown, не до
+  ```
+
+  Разница между `Shutdown` и `Close` принципиальна: `Shutdown` дожидается запросов, `Close` немедленно рвёт все соединения — это аварийный путь по истечении дедлайна. Внутри `Shutdown` помечает сервер закрытым (новые `Accept` получают `ErrServerClosed`), закрывает listeners, а затем в цикле опрашивает число активных соединений с нарастающей паузой (до ~500 мс между опросами), пока их не станет ноль или не истечёт контекст. Поэтому дедлайн shutdown разумно согласовать с самым долгим ожидаемым запросом: слишком короткий оборвёт легитимные ответы, слишком длинный — задержит выкатку.
+
+  ## Жизненный цикл контекстов
+
+  За остановкой стоят два разных контекста, и путать их — частая ошибка. Первый рождается из сигнала (`NotifyContext`) и служит триггером «пора останавливаться». Второй — это дедлайн дренажа (`WithTimeout`), он ограничивает, сколько мы готовы ждать активные запросы. Отмена расходится по дереву: родительский контекст запроса пробрасывается в хендлеры, и когда сервер закрывается, зависимые операции получают сигнал через `ctx.Done()`.
+
+  <svg viewBox="0 0 720 210" role="img" aria-label="Два контекста при остановке: сигнальный контекст от NotifyContext триггерит shutdown, отдельный timeout-контекст ограничивает дренаж и распространяет отмену на хендлеры">
+  <defs>
+  <marker id="s82" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#0D7680"/>
+  </marker>
+  </defs>
+  <rect x="30" y="30" width="230" height="66" rx="6" fill="none" stroke="#B4552D"/>
+  <text x="45" y="56" font-family="system-ui, sans-serif" font-size="13" fill="#B4552D">signal ctx · NotifyContext</text>
+  <text x="45" y="78" font-family="system-ui, sans-serif" font-size="12" fill="#757575">Done() при SIGTERM → триггер</text>
+  <rect x="30" y="128" width="230" height="66" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="45" y="154" font-family="system-ui, sans-serif" font-size="13" fill="#242424">timeout ctx · WithTimeout</text>
+  <text x="45" y="176" font-family="system-ui, sans-serif" font-size="12" fill="#757575">дедлайн дренажа для Shutdown</text>
+  <rect x="440" y="128" width="250" height="66" rx="6" fill="none" stroke="#0D7680"/>
+  <text x="455" y="154" font-family="system-ui, sans-serif" font-size="13" fill="#242424">хендлеры / воркеры</text>
+  <text x="455" y="176" font-family="system-ui, sans-serif" font-size="12" fill="#757575">видят отмену через ctx.Done()</text>
+  <line x1="145" y1="98" x2="145" y2="126" stroke="#0D7680" marker-end="url(#s82)"/>
+  <text x="240" y="118" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#0D7680">запускает Shutdown</text>
+  <line x1="262" y1="161" x2="438" y2="161" stroke="#0D7680" marker-end="url(#s82)"/>
+  <text x="350" y="150" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#0D7680">отмена вниз по дереву</text>
+  </svg>
+
+  Возврат `stop()` вторым вызовом снимает перехват сигналов — тогда повторный Ctrl+C убьёт подвисший процесс принудительно. Для нескольких компонентов (HTTP + gRPC + воркеры) удобен `errgroup`: одна горутина `g.Go` ждёт `ctx.Done()` и вызывает `Shutdown`, другие держат `ListenAndServe` и цикл консьюмера, а `g.Wait()` собирает общий итог и первую ошибку. Так все части останавливаются от одного сигнала и не разъезжаются в разнобой.
+
+  ## Шаг нулевой: снять трафик заранее
+
+  На проде у последовательности есть скрытый нулевой шаг — увести с пода трафик **до** того, как начнётся дренаж. В Kubernetes SIGTERM и удаление из endpoints происходят почти одновременно, но новая маршрутизация расходится по kube-proxy и балансировщикам не мгновенно. Если сразу дёрнуть `Shutdown`, часть уже отправленных запросов прилетит в закрывающийся под и получит отказ. Поэтому сначала readiness-проба должна начать отдавать «не готов», а `preStop`-хук с небольшой паузой (несколько секунд) даёт балансировщику время переключиться. Важно и то, чтобы `terminationGracePeriodSeconds` был заведомо больше вашего shutdown timeout, иначе оркестратор пришлёт SIGKILL прямо посреди дренажа и всё старание пропадёт.
+
+  Дренаж — это не только HTTP. Консьюмеры очередей и фоновые джобы тоже надо останавливать корректно: перестать забирать новые сообщения, дать доработать взятым, подтвердить (ack) успешные и только потом закрыть соединение с брокером. Тот же принцип, что и с БД: инфраструктурные ресурсы закрываются последними, когда все, кто ими пользовался, уже завершились.
+
+  ## Типичные заблуждения
+
+  - **«`Shutdown` закрывает вообще всё».** Нет: он не трогает hijacked-соединения (WebSocket, `http.Hijacker`) и не прерывает уже запущенные хендлеры — только ждёт их. Стриминг (SSE, long polling) и WebSocket надо завершать вручную по сигналу отмены.
+  - **«Порядок закрытия неважен».** Важен: закрыть БД до `Shutdown` — значит уронить активные запросы. Ресурсы закрывают **после** дренажа.
+  - **«В Kubernetes достаточно поймать SIGTERM».** SIGTERM приходит одновременно с удалением из endpoints, но балансировщик узнаёт об этом не мгновенно; нужен `preStop`-хук и `terminationGracePeriodSeconds` больше, чем shutdown timeout, иначе часть трафика придёт уже в закрывающийся под.
+  - **«Один контекст на всё».** Сигнальный контекст и таймаут дренажа — разные сущности с разными задачами.
+
+  ## Что отвечать на собеседовании
+
+  - Опишите четыре шага: **сигнал → стоп приёма → дренаж под таймаутом → закрытие ресурсов**, и обязательно — правильный порядок (ресурсы последними).
+  - Покажите идиому `signal.NotifyContext` + `srv.Shutdown(ctxWithTimeout)` + `Close` как аварийный fallback по дедлайну.
+  - Объясните два контекста: сигнальный (триггер) и таймаут дренажа, и зачем повторный `stop()`.
+  - Назовите, чего `Shutdown` не делает (WebSocket/hijacked/активные хендлеры), и увяжите таймаут с `terminationGracePeriodSeconds`/`preStop` в Kubernetes — это выводит ответ на senior-уровень.
+related_questions: [graceful-shutdown-service, context-cancellation-internals, select-patterns-timeout, worker-pool-pattern]
+related_tasks: [worker-pool-limits]

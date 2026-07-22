@@ -1,0 +1,16 @@
+# Runtime data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Built frontend / node deps
+web/dist/
+web/node_modules/
+
+# Go build output
+/bin/
+
+# Local artifacts
+*.zip
+.DS_Store

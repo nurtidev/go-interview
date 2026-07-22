@@ -1,0 +1,168 @@
+slug: merge-channels
+kind: go
+title: "Merge Channels (fan-in)"
+difficulty: staff
+tags: [concurrency, channels, fan-in]
+statement_md: |
+  Реализуйте fan-in: функцию, которая сливает значения из нескольких входных
+  каналов в один выходной.
+
+  ```go
+  func Merge(chs ...<-chan int) <-chan int
+  ```
+
+  Требования:
+
+  - Все значения из всех входных каналов должны попасть в выходной канал
+    (ничего не теряется и не дублируется).
+  - Выходной канал должен быть **закрыт** ровно после того, как закрыты все
+    входные каналы и переданы все значения. Иначе потребитель, читающий через
+    `for v := range out`, зависнет навсегда.
+  - Порядок значений в выходном канале не важен.
+  - `Merge()` без аргументов возвращает немедленно закрытый канал.
+
+  Решение проверяется под `-race`.
+starter_code: |
+  package main
+
+  // Merge выполняет fan-in: сливает значения из всех входных каналов в один
+  // выходной и закрывает его, когда все входы закрыты.
+  func Merge(chs ...<-chan int) <-chan int {
+      // TODO: fan-in с корректным закрытием выходного канала
+      return nil
+  }
+hints:
+  - "На каждый входной канал запустите свою горутину, которая пересылает его значения в общий выходной канал. Так чтение из входов идёт параллельно."
+  - "Главная сложность — когда закрывать выход. Закрыть его должна ровно одна сторона и ровно один раз, только после того как все пересылающие горутины завершились."
+  - "Используйте sync.WaitGroup: wg.Add на каждый входной канал, каждая горутина делает wg.Done по завершении range по своему каналу. Отдельная горутина делает wg.Wait() и затем close(out). Возвращайте out сразу, не дожидаясь завершения."
+solution_md: |
+  ### Идея
+
+  Классический паттерн fan-in. На каждый входной канал запускаем горутину,
+  которая в цикле `for v := range c` пересылает значения в общий выходной канал
+  `out`. Чтения из разных входов идут параллельно.
+
+  Ключевой момент — корректное закрытие `out`. Закрывать его должна ровно одна
+  сторона и ровно один раз, и только когда **все** пересылающие горутины
+  завершились (иначе получим запись в закрытый канал — панику, либо преждевременное
+  закрытие с потерей данных). Синхронизируем через `sync.WaitGroup`: счётчик
+  равен числу входных каналов, каждая горутина уменьшает его на `Done`, а
+  отдельная «горутина-закрыватель» делает `wg.Wait()` и `close(out)`.
+
+  `out` возвращаем немедленно, не дожидаясь завершения, — потребитель начинает
+  читать сразу. Для `Merge()` без аргументов `WaitGroup` пуст, поэтому
+  закрыватель сразу закрывает `out`.
+
+  ### Эталонное решение
+
+  ```go
+  import "sync"
+
+  func Merge(chs ...<-chan int) <-chan int {
+      out := make(chan int)
+      var wg sync.WaitGroup
+      for _, ch := range chs {
+          wg.Add(1)
+          go func(c <-chan int) {
+              defer wg.Done()
+              for v := range c {
+                  out <- v
+              }
+          }(ch)
+      }
+      go func() {
+          wg.Wait()
+          close(out)
+      }()
+      return out
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Закрыть `out` внутри пересылающей горутины — другая ещё пишет, будет паника «send on closed channel».
+  - Захватить переменную цикла `ch` замыканием без передачи параметром — до Go 1.22 все горутины видели последний канал (в новых версиях это исправлено, но передавать явно надёжнее).
+  - Вообще не закрывать `out` — `range` у потребителя зависает навсегда (goroutine leak).
+  - Вызвать `close(out)` без ожидания всех горутин — часть значений теряется.
+time_limit_sec: 10
+race: true
+test_code: |
+  package main
+
+  import (
+      "testing"
+      "time"
+  )
+
+  func gen(vals ...int) <-chan int {
+      c := make(chan int)
+      go func() {
+          for _, v := range vals {
+              c <- v
+          }
+          close(c)
+      }()
+      return c
+  }
+
+  func TestMergeCollectsAll(t *testing.T) {
+      out := Merge(gen(1, 2, 3), gen(4, 5), gen(6, 7, 8, 9))
+      want := map[int]int{1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1, 9: 1}
+      got := map[int]int{}
+
+      done := make(chan struct{})
+      go func() {
+          for v := range out {
+              got[v]++
+          }
+          close(done)
+      }()
+      select {
+      case <-done:
+      case <-time.After(3 * time.Second):
+          t.Fatal("выходной канал не закрыт: range по Merge() не завершился")
+      }
+
+      if len(got) != len(want) {
+          t.Fatalf("получено %d различных значений, want %d (%v)", len(got), len(want), got)
+      }
+      for v, n := range want {
+          if got[v] != n {
+              t.Fatalf("значение %d получено %d раз, want %d", v, got[v], n)
+          }
+      }
+  }
+
+  func TestMergeEmpty(t *testing.T) {
+      out := Merge()
+      select {
+      case _, ok := <-out:
+          if ok {
+              t.Fatal("Merge() без каналов должен вернуть закрытый канал")
+          }
+      case <-time.After(2 * time.Second):
+          t.Fatal("Merge() без каналов не закрыл выход")
+      }
+  }
+
+  func TestMergeSingle(t *testing.T) {
+      out := Merge(gen(10, 20, 30))
+      var sum int
+      count := 0
+      done := make(chan struct{})
+      go func() {
+          for v := range out {
+              sum += v
+              count++
+          }
+          close(done)
+      }()
+      select {
+      case <-done:
+      case <-time.After(2 * time.Second):
+          t.Fatal("выходной канал не закрыт")
+      }
+      if count != 3 || sum != 60 {
+          t.Fatalf("count=%d sum=%d, want count=3 sum=60", count, sum)
+      }
+  }

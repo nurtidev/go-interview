@@ -1,0 +1,74 @@
+slug: top-customers
+kind: sql
+title: "Топ покупателей по сумме заказов"
+difficulty: middle
+tags: [join, group-by, aggregation]
+statement_md: |
+  Есть таблицы покупателей `customers` и их заказов `orders`. Найдите **топ-3**
+  покупателей по суммарной стоимости заказов.
+
+  Верните два столбца: `name` — имя покупателя и `total` — сумма `amount` по всем
+  его заказам. Отсортируйте по `total` по убыванию; при равенстве сумм — по
+  `name` по возрастанию. Покупатели без заказов в результат не попадают.
+starter_code: |
+  -- Верните name и total для топ-3 покупателей по сумме заказов.
+  SELECT ...
+hints:
+  - "Данные о покупателе и сумме заказа лежат в разных таблицах — их нужно соединить по customer_id. Покупатели без заказов не нужны, значит подойдёт обычный INNER JOIN."
+  - "Чтобы получить сумму по каждому покупателю, сгруппируйте строки (GROUP BY по покупателю) и примените агрегат SUM(amount)."
+  - "Отсортируйте результат по сумме (ORDER BY total DESC), добавьте вторичную сортировку по имени для детерминизма и ограничьте вывод через LIMIT 3."
+solution_md: |
+  ### Идея
+
+  Соединяем `customers` и `orders` по `customer_id` (INNER JOIN автоматически
+  отбрасывает покупателей без заказов), группируем по покупателю и считаем сумму
+  `amount`. Сортируем по сумме убыванию, при равенстве — по имени, и берём первые
+  три строки через `LIMIT`.
+
+  ### Эталонный запрос
+
+  ```sql
+  SELECT c.name, SUM(o.amount) AS total
+  FROM customers c
+  JOIN orders o ON o.customer_id = c.id
+  GROUP BY c.id, c.name
+  ORDER BY total DESC, c.name
+  LIMIT 3;
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Группировать только по `name`, а не по `c.id` — при одинаковых именах суммы склеятся.
+  - Забыть вторичную сортировку — при равных суммах порядок недетерминирован.
+  - Использовать LEFT JOIN и получить покупателей без заказов с `total = NULL`.
+  - Ставить условие на агрегат в `WHERE` вместо `HAVING` (здесь не требуется, но частая путаница).
+schema_sql: |
+  CREATE TABLE customers (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL
+  );
+  CREATE TABLE orders (
+    id          INTEGER PRIMARY KEY,
+    customer_id INTEGER NOT NULL,
+    amount      INTEGER NOT NULL
+  );
+seed_sql: |
+  INSERT INTO customers (id, name) VALUES
+    (1, 'Alice'),
+    (2, 'Bob'),
+    (3, 'Carol'),
+    (4, 'Dave');
+  INSERT INTO orders (id, customer_id, amount) VALUES
+    (1, 1, 100),
+    (2, 1, 200),
+    (3, 1, 50),
+    (4, 2, 300),
+    (5, 2, 300),
+    (6, 3, 500);
+expected:
+  columns: [name, total]
+  rows:
+    - ["Bob", "600"]
+    - ["Carol", "500"]
+    - ["Alice", "350"]
+  order_matters: true

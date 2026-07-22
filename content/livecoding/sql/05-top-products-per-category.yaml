@@ -1,0 +1,93 @@
+slug: top-products-per-category
+kind: sql
+title: "Топ-2 товара по выручке в каждой категории"
+difficulty: senior
+tags: [window-function, row-number, partition-by]
+statement_md: |
+  Есть таблица товаров `products` со столбцами `id`, `name`, `category` и
+  `revenue` (суммарная выручка по товару). Для **каждой категории** найдите
+  **топ-2** товара по выручке.
+
+  Верните три столбца: `category`, `name`, `revenue`. Отсортируйте результат по
+  `category` по возрастанию, внутри категории — по `revenue` по убыванию; при
+  равной выручке — по `name` по возрастанию. Считайте, что в каждой категории
+  есть хотя бы два товара.
+starter_code: |
+  -- Верните category, name, revenue: по два товара с наибольшей выручкой в каждой категории.
+  SELECT ...
+hints:
+  - "Обычный ORDER BY ... LIMIT даёт топ по всей таблице, а нужен топ внутри каждой категории отдельно. Значит, ранжировать надо не глобально, а по группам."
+  - "Нужна оконная функция ранжирования с разбиением по категории: ROW_NUMBER() OVER (PARTITION BY category ORDER BY revenue DESC). PARTITION BY заводит отдельную нумерацию внутри каждой категории."
+  - "Посчитайте номер строки в подзапросе/CTE, затем во внешнем запросе оставьте строки с номером <= 2. Для детерминизма добавьте в ORDER BY окна вторичный ключ name, а результат отсортируйте по category, revenue DESC, name."
+solution_md: |
+  ### Идея
+
+  «Топ-N в каждой группе» — классическая задача на оконную функцию ранжирования.
+  `ROW_NUMBER() OVER (PARTITION BY category ORDER BY revenue DESC, name)` заводит
+  собственную нумерацию строк внутри каждой категории: самый выручечный товар
+  получает номер 1, следующий — 2 и так далее. Затем во внешнем запросе оставляем
+  строки с номером не больше 2.
+
+  Считать номер в том же `WHERE` нельзя — оконные функции вычисляются после
+  `WHERE`, поэтому нужен подзапрос или CTE, где сначала присваиваем номер, а потом
+  фильтруем по нему.
+
+  ### Эталонный запрос
+
+  ```sql
+  WITH ranked AS (
+    SELECT category,
+           name,
+           revenue,
+           ROW_NUMBER() OVER (
+             PARTITION BY category
+             ORDER BY revenue DESC, name
+           ) AS rn
+    FROM products
+  )
+  SELECT category, name, revenue
+  FROM ranked
+  WHERE rn <= 2
+  ORDER BY category, revenue DESC, name;
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Пытаться отфильтровать `WHERE rn <= 2` в том же уровне, где вычисляется
+    `ROW_NUMBER()` — оконные функции нельзя использовать в `WHERE`, нужен
+    подзапрос/CTE.
+  - Забыть `PARTITION BY category` — тогда получится глобальный топ-2 по всей
+    таблице, а не по каждой категории.
+  - Перепутать `ROW_NUMBER` с `RANK`/`DENSE_RANK`: при равной выручке `RANK` даст
+    одинаковый номер и «топ-2» может вернуть больше двух строк; `ROW_NUMBER`
+    всегда даёт ровно по 2 (нужен вторичный ключ сортировки для детерминизма).
+  - Положиться на порядок вывода из окна — обязателен внешний `ORDER BY`.
+schema_sql: |
+  CREATE TABLE products (
+    id       INTEGER PRIMARY KEY,
+    name     TEXT NOT NULL,
+    category TEXT NOT NULL,
+    revenue  INTEGER NOT NULL
+  );
+seed_sql: |
+  INSERT INTO products (id, name, category, revenue) VALUES
+    (1,  'Laptop',     'Electronics', 1500),
+    (2,  'Phone',      'Electronics', 1200),
+    (3,  'Tablet',     'Electronics', 800),
+    (4,  'Headphones', 'Electronics', 300),
+    (5,  'Novel',      'Books',       200),
+    (6,  'Textbook',   'Books',       500),
+    (7,  'Comic',      'Books',       150),
+    (8,  'Robot',      'Toys',        400),
+    (9,  'Puzzle',     'Toys',        100),
+    (10, 'Doll',       'Toys',        250);
+expected:
+  columns: [category, name, revenue]
+  rows:
+    - ["Books", "Textbook", "500"]
+    - ["Books", "Novel", "200"]
+    - ["Electronics", "Laptop", "1500"]
+    - ["Electronics", "Phone", "1200"]
+    - ["Toys", "Robot", "400"]
+    - ["Toys", "Doll", "250"]
+  order_matters: true

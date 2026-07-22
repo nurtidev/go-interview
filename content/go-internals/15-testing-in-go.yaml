@@ -1,0 +1,120 @@
+slug: testing-in-go
+section: go-internals
+title: "Тестирование в Go: table-driven, t.Run/t.Parallel, httptest, бенчмарки, fuzzing"
+difficulty: middle
+tags: [testing, benchmarks]
+question_md: |
+  Как тестируют код на Go? Что такое table-driven тесты, зачем `t.Run` и `t.Parallel`, как тестировать HTTP через `httptest`? Почему в Go редко нужны mock-фреймворки и как мокают через интерфейсы? Как писать бенчмарки (`b.N`, `b.Loop` в 1.24), что такое fuzzing и как смотреть покрытие?
+answer_levels:
+  - level: middle
+    text_md: |
+      Тесты живут рядом с кодом в файлах `_test.go`, функции — `func TestXxx(t *testing.T)`. Запуск: `go test ./...`.
+
+      **Table-driven** — канонический стиль Go: описываем случаи таблицей и гоняем в цикле, что убирает копипасту и делает добавление случая тривиальным:
+
+      ```go
+      func TestAbs(t *testing.T) {
+          tests := []struct {
+              name string
+              in   int
+              want int
+          }{
+              {"positive", 5, 5},
+              {"negative", -5, 5},
+              {"zero", 0, 0},
+          }
+          for _, tt := range tests {
+              t.Run(tt.name, func(t *testing.T) {
+                  if got := Abs(tt.in); got != tt.want {
+                      t.Errorf("Abs(%d) = %d, want %d", tt.in, got, tt.want)
+                  }
+              })
+          }
+      }
+      ```
+
+      `t.Run(name, fn)` создаёт **подтест**: он виден отдельной строкой в выводе, его можно запустить точечно (`go test -run TestAbs/negative`), а падение одного случая не прерывает остальные.
+
+      `t.Errorf` — фиксирует провал, но продолжает; `t.Fatalf` — фиксирует и немедленно останавливает текущий (под)тест (нельзя вызывать из другой горутины). Проверьте ошибки покрытием: `go test -cover`.
+  - level: senior
+    text_md: |
+      **t.Parallel.** Вызов `t.Parallel()` внутри (под)теста помечает его как параллельный: такие тесты приостанавливаются, пока родитель не завершится, а затем запускаются одновременно (число ограничено `-parallel`, по умолчанию `GOMAXPROCS`). Ускоряет I/O-bound наборы и вылавливает гонки под `-race`. Классическая ловушка до Go 1.22 — захват loop-переменной: в параллельном подтесте `tt` могла «съехать» на последнюю итерацию. С Go 1.22 (новая семантика loop var) `tt` в каждой итерации своя, и `tt := tt` больше не нужен.
+
+      **httptest.** Для HTTP не поднимают реальный порт. `httptest.NewRecorder()` ловит ответ хендлера, `httptest.NewServer(handler)` поднимает реальный сервер на случайном порту для клиентских тестов:
+
+      ```go
+      func TestHandler(t *testing.T) {
+          req := httptest.NewRequest(http.MethodGet, "/users/1", nil)
+          rec := httptest.NewRecorder()
+
+          UserHandler(rec, req)
+
+          if rec.Code != http.StatusOK {
+              t.Fatalf("status = %d, want 200", rec.Code)
+          }
+      }
+      ```
+
+      **Моки через интерфейсы.** В Go мок — это чаще всего ручная реализация небольшого интерфейса, а не сгенерированный класс. Код зависит от узкого интерфейса, тест подставляет фейк:
+
+      ```go
+      type Store interface {
+          GetUser(ctx context.Context, id int) (User, error)
+      }
+
+      type fakeStore struct{ user User; err error }
+
+      func (f fakeStore) GetUser(context.Context, int) (User, error) {
+          return f.user, f.err
+      }
+      ```
+
+      Почему mock-фреймворки (gomock, testify/mock) нужны реже, чем в Java/C#: интерфейсы в Go **неявные и узкие** (объявляются на стороне потребителя), поэтому написать фейк на 3 метода руками дешевле, чем настраивать матчеры и ожидания. Фреймворки оправданы, когда важно проверять *порядок и число вызовов* или интерфейс большой (тогда `mockgen` экономит рутину). Идиома «принимай интерфейсы, возвращай структуры» и делает код тестируемым.
+  - level: deep
+    text_md: |
+      **Бенчмарки.** `func BenchmarkXxx(b *testing.B)`; фреймворк сам подбирает число итераций. Классический вид — цикл по `b.N`:
+
+      ```go
+      func BenchmarkParse(b *testing.B) {
+          data := makeInput()
+          b.ResetTimer()          // не считаем подготовку
+          for i := 0; i < b.N; i++ {
+              _ = Parse(data)
+          }
+      }
+      ```
+
+      С Go 1.24 появился `b.Loop()` — предпочтительный способ: он корректно управляет таймером и, главное, **не даёт компилятору выкинуть тело как мёртвый код** (оптимизатор не может доказать, что результат не нужен), устраняя классические ошибки замеров:
+
+      ```go
+      func BenchmarkParse(b *testing.B) {
+          data := makeInput()
+          for b.Loop() { // 1.24+: setup до цикла считается один раз, dead-code elimination не мешает
+              Parse(data)
+          }
+      }
+      ```
+
+      Запуск: `go test -bench=. -benchmem` (`-benchmem` печатает аллокации/оп). До 1.24 от dead-code защищались присваиванием в пакетную переменную (`sink = Parse(data)`).
+
+      **Fuzzing** (нативно с Go 1.18). `func FuzzXxx(f *testing.F)` с seed-корпусом и `f.Fuzz`; движок сам мутирует входы, ища паники и нарушения инвариантов (частый паттерн — round-trip `Unmarshal(Marshal(x)) == x`):
+
+      ```go
+      func FuzzParse(f *testing.F) {
+          f.Add("42")               // seed
+          f.Fuzz(func(t *testing.T, s string) {
+              _ = Parse(s)          // не должно паниковать ни на каком входе
+          })
+      }
+      ```
+
+      Запуск фаззинга: `go test -fuzz=FuzzParse` (обычный `go test` гоняет только seed-корпус). Найденные падающие входы сохраняются в `testdata/fuzz/` и становятся регрессионными тестами.
+
+      **Покрытие.** `go test -coverprofile=cover.out ./...`, затем `go tool cover -html=cover.out` для визуализации или `-func` для сводки по функциям. С Go 1.20 покрытие можно собирать и с интеграционных прогонов бинаря (`go build -cover`, переменная `GOCOVERDIR`), а не только с юнит-тестов. Важно: высокий процент покрытия не означает качество — он показывает, какие строки *исполнялись*, но не проверяет корректность ассертов; 100% покрытие с пустыми проверками бесполезно.
+
+      **Полезные детали.** `t.Cleanup(fn)` — регистрирует очистку (лучше `defer` в хелперах, так как выполнится и при `t.Parallel`). `t.Helper()` в тест-хелпере переносит номер строки провала на вызывающего. `t.TempDir()` — авто-удаляемая временная папка. `testing.Short()` + `-short` — пропуск тяжёлых тестов в быстром прогоне. `go test -race` включает детектор гонок — обязателен в CI для конкурентного кода.
+follow_ups:
+  - "Почему до Go 1.22 в параллельных подтестах писали tt := tt, и почему теперь не нужно?"
+  - "Чем b.Loop (1.24) лучше цикла по b.N и как раньше защищались от dead-code elimination?"
+  - "Когда ручной фейк-интерфейс предпочтительнее gomock/testify, а когда наоборот?"
+  - "Почему высокий процент покрытия сам по себе не гарантирует качество тестов?"

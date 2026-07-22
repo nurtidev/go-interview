@@ -1,0 +1,119 @@
+slug: heap-topk-container-heap
+section: algorithms
+title: "Куча и top-K через container/heap"
+difficulty: senior
+tags: [heap, topk]
+question_md: |
+  Как реализовать min-heap/max-heap через container/heap.Interface в Go, и как решить задачу top-K (например, «top K frequent elements») за O(n log k)? Разберите частые ловушки: прямой вызов Push/Pop, heap.Fix/heap.Remove, приоритетную очередь с индексом для обновления элементов.
+answer_levels:
+  - level: middle
+    text_md: |
+      `container/heap` в Go — не готовая структура данных, а набор функций (`Init`, `Push`, `Pop`, `Fix`, `Remove`), которые поддерживают heap-инвариант над вашим типом, реализующим интерфейс `heap.Interface`: `Len() int`, `Less(i, j int) bool`, `Swap(i, j int)`, плюс `Push(x any)` и `Pop() any` на приёмнике-указателе. Min-heap или max-heap определяется исключительно знаком в `Less`: `a[i] < a[j]` даёт min-heap (наверху минимум), `a[i] > a[j]` — max-heap.
+
+      Топ-K наибольших элементов классически решается через min-heap размера K: проходим по всем n элементам, если куча меньше K — просто кладём, если куча уже размера K и новый элемент больше вершины (минимума) — выкидываем вершину и кладём новый; в конце в куче лежат ровно K наибольших. Это даёт O(n log k) вместо O(n log n) полной сортировки. `heap.Init` приводит произвольный слайс к heap-инвариантам за O(n), `heap.Push`/`heap.Pop` добавляют/убирают за O(log n). Частая ошибка — вызывать `h.Push(x)`/`h.Pop()` напрямую у своего типа: это просто добавит/отрежет элемент слайса без восстановления heap-инварианта — обязательно нужно вызывать `heap.Push(&h, x)` и `heap.Pop(&h)`.
+  - level: senior
+    text_md: |
+      Полный шаблон «top K frequent elements» через min-heap размера k:
+
+      ```go
+      type Item struct {
+          Value int
+          Count int
+      }
+
+      type freqHeap []Item
+
+      func (h freqHeap) Len() int           { return len(h) }
+      func (h freqHeap) Less(i, j int) bool { return h[i].Count < h[j].Count } // min-heap по частоте
+      func (h freqHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+      func (h *freqHeap) Push(x any) {
+          *h = append(*h, x.(Item))
+      }
+
+      func (h *freqHeap) Pop() any {
+          old := *h
+          n := len(old)
+          item := old[n-1]
+          *h = old[:n-1]
+          return item
+      }
+
+      func topKFrequent(nums []int, k int) []int {
+          freq := make(map[int]int, len(nums))
+          for _, n := range nums {
+              freq[n]++
+          }
+
+          h := &freqHeap{}
+          heap.Init(h)
+          for value, count := range freq {
+              heap.Push(h, Item{Value: value, Count: count})
+              if h.Len() > k {
+                  heap.Pop(h) // выкидываем наименьший по частоте
+              }
+          }
+
+          result := make([]int, h.Len())
+          for i := len(result) - 1; i >= 0; i-- {
+              result[i] = heap.Pop(h).(Item).Value
+          }
+          return result
+      }
+      ```
+
+      Сложность: построение частотной map — O(n); проход по u уникальным значениям с push/pop, ограниченным размером k, — O(u log k); финальное вычерпывание — O(k log k). Итого O(n + u log k), что заметно лучше O(n log n) полной сортировки при большом n и малом k. Edge cases: `k >= len(freq)` (куча никогда не превышает k, остаются все элементы); равные частоты (порядок среди них не определён heap-ом, и это нужно явно проговорить, если задача требует детерминированного tie-break); приёмник `Push`/`Pop` обязан быть указателем — иначе изменение слайса внутри метода не будет видно вызывающему коду через интерфейс.
+
+      Приоритетная очередь с полем `index` для `heap.Fix`/`heap.Remove` (например, для Dijkstra с decrease-key):
+
+      ```go
+      type pqItem struct {
+          value    string
+          priority int
+          index    int // позиция элемента в куче — нужна для heap.Fix/heap.Remove
+      }
+
+      type PQ []*pqItem
+
+      func (pq PQ) Len() int           { return len(pq) }
+      func (pq PQ) Less(i, j int) bool { return pq[i].priority < pq[j].priority }
+      func (pq PQ) Swap(i, j int) {
+          pq[i], pq[j] = pq[j], pq[i]
+          pq[i].index = i
+          pq[j].index = j // критично: Swap обязан обновлять index, иначе Fix/Remove будут ссылаться не туда
+      }
+      func (pq *PQ) Push(x any) {
+          item := x.(*pqItem)
+          item.index = len(*pq)
+          *pq = append(*pq, item)
+      }
+      func (pq *PQ) Pop() any {
+          old := *pq
+          n := len(old)
+          item := old[n-1]
+          old[n-1] = nil
+          item.index = -1
+          *pq = old[:n-1]
+          return item
+      }
+      ```
+
+      С таким полем `index` можно вызывать `heap.Fix(&pq, item.index)` после изменения `item.priority` — O(log n) восстановление инварианта без полного `Pop`+`Push`, и `heap.Remove(&pq, item.index)` для удаления произвольного, не только верхнего, элемента.
+  - level: deep
+    text_md: |
+      Несколько вещей, которые проверяют на уровне глубокого понимания `container/heap`.
+
+      Во-первых, откуда O(log n) у `Push`/`Pop` и O(n) у `Init`. Внутри пакета `up` (sift-up) двигает добавленный элемент к корню, сравнивая с родителем `(j-1)/2`, и останавливается, как только инвариант восстановлен — в худшем случае это высота дерева, то есть O(log n). `down` (sift-down) при `Pop` меняет корень с последним элементом, укорачивает и «протаскивает» новый корень вниз — тоже O(log n). А `Init` — это НЕ n раз `Push` (что дало бы O(n log n)): он вызывает `down` от середины массива к началу, и стандартный анализ через сумму высот поддеревьев показывает, что весь heapify — O(n), потому что большинство узлов находится близко к листьям, где `down` делает мало работы.
+
+      Во-вторых, cache locality. Двоичная куча на слайсе адресует потомков по индексам `2i+1`/`2i+2` — с ростом дерева соседние по логике узлы всё дальше по памяти, и обходы прыгают по кэш-линиям почти на каждом уровне, в отличие от quicksort/pdqsort в `slices.Sort`, который работает последовательными проходами. Именно поэтому heap sort корректен по Big O (O(n log n)), но на практике заметно медленнее `slices.Sort` на тех же данных — константа хуже из-за паттернов доступа к памяти, а не асимптотики.
+
+      В-третьих, boxing и аллокации: сигнатуры `Push(x any)`/`Pop() any` заставляют упаковывать конкретный тип в interface — для типа-структуры это означает, что при каждом `heap.Push` значение может уйти в отдельную аллокацию на куче (escape analysis почти всегда заключает, что данные, упакованные в `any` и сохраняемые дольше текущего вызова, должны жить в куче). Для горячего пути осмысленная оптимизация — заранее выделить пул элементов и передавать указатели, либо вообще не использовать generic `container/heap`, а написать heapify руками над конкретным слайсом без interface — тогда компилятор мономорфизирует всё без boxing.
+
+      В-четвёртых, тонкость с полем `index`: `Swap` пользовательского типа обязан обновлять `index` у обоих переставляемых элементов; если забыть, `heap.Fix(&pq, item.index)` будет чинить инвариант вокруг неправильной позиции, тихо ломая корректность без видимой паники — одна из самых частых причин трудноуловимых багов в реализациях Dijkstra/A* на `container/heap`. Ещё стоит помнить: куча — не стабильная структура, порядок среди равных по `Less` элементов не определён и может меняться между запусками, так что если задаче нужен детерминированный tie-break, в `Less` добавляют вторичный критерий.
+
+      Наконец, `container/heap` не потокобезопасен — при использовании как shared priority queue в пуле воркеров нужен внешний `sync.Mutex` вокруг каждого `heap.Push`/`heap.Pop`/`heap.Fix`; и куча, как обычный слайс, никогда не уменьшает `cap` сама — если через неё прошёл пиковый объём в миллионы элементов, а сейчас там пусто, память backing array не освобождается, пока жив сам слайс-куча.
+follow_ups:
+  - "Почему heap.Init работает за O(n), а не за O(n log n), как n последовательных вызовов heap.Push?"
+  - "Что пойдёт не так, если забыть обновлять поле index в методе Swap приоритетной очереди?"
+  - "В чём разница между top-K через min-heap и через quickselect, и когда какой подход лучше?"
+  - "Почему нельзя вызывать h.Push(x) напрямую у типа, реализующего heap.Interface?"

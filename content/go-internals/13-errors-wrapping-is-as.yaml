@@ -1,0 +1,130 @@
+slug: errors-wrapping-is-as
+section: go-internals
+title: "Ошибки в Go: %w vs %v, errors.Is/As, sentinel vs typed, errors.Join"
+difficulty: senior
+tags: [errors, error-handling]
+question_md: |
+  Как устроена обработка ошибок в Go? В чём разница между `%w` и `%v` при оборачивании через `fmt.Errorf`, как именно `errors.Is` и `errors.As` проходят цепочку обёрток и причём тут `Unwrap`? Когда выбирать sentinel-ошибки, а когда — типизированные (custom) ошибки? Что даёт `errors.Join` (Go 1.20) и какие типичные ошибки дизайна ошибок встречаются в проде?
+answer_levels:
+  - level: middle
+    text_md: |
+      `error` — это обычный интерфейс с единственным методом `Error() string`. Идиома Go — возвращать ошибку последним значением и проверять `if err != nil` сразу на месте, а не кидать исключения.
+
+      **Оборачивание.** Чтобы добавить контекст, но сохранить исходную ошибку, используют глагол `%w` в `fmt.Errorf`:
+
+      ```go
+      if err != nil {
+          return fmt.Errorf("load user %d: %w", id, err) // оборачиваем
+      }
+      ```
+
+      `%w` (появился в Go 1.13) строит **цепочку**: обёртка помнит вложенную ошибку и её можно достать через `errors.Unwrap`. `%v` же просто вставляет текст ошибки в строку — исходный объект теряется, распаковать его нельзя.
+
+      **Проверка причины.** Из-за оборачивания нельзя писать `err == ErrNotFound` — это сравнит верхнюю обёртку, а не то, что внутри. Нужны:
+
+      ```go
+      // sentinel: ищем конкретное значение по всей цепочке
+      if errors.Is(err, sql.ErrNoRows) { ... }
+
+      // typed: достаём конкретный тип и его поля
+      var perr *NotFoundError
+      if errors.As(err, &perr) {
+          log.Printf("нет ключа %s", perr.Key)
+      }
+      ```
+
+      Правило: `Is` — когда сравниваем с известным значением-ошибкой (sentinel вроде `io.EOF`, `sql.ErrNoRows`), `As` — когда нужен доступ к полям своего типа ошибки.
+  - level: senior
+    text_md: |
+      **Механика Is/As.** Обе функции идут по цепочке, вызывая `Unwrap()` на каждом уровне.
+
+      `errors.Is(err, target)` на каждом шаге: (1) если `err` сравнимо, проверяет `err == target`; (2) если у `err` есть метод `Is(error) bool`, вызывает его (это позволяет типу самому решать, эквивалентен ли он target); (3) спускается через `Unwrap`. Останавливается, как только нашла совпадение или цепочка кончилась.
+
+      `errors.As(err, &target)` идёт так же, но на каждом уровне пытается **присвоить** текущую ошибку в `target` через reflection: если динамический тип `err` присваиваем типу, на который указывает `target`, — присваивает и возвращает `true`. Тоже уважает пользовательский метод `As(any) bool`. Важно: второй аргумент — обязательно указатель на переменную типа ошибки (или интерфейса), иначе паника.
+
+      **Sentinel vs typed.**
+
+      - *Sentinel* — пакетная переменная `var ErrNotFound = errors.New("not found")`. Дёшево, но создаёт зависимость по API: клиент пишет `errors.Is(err, pkg.ErrNotFound)`, и переименовать/убрать её — breaking change. Не несёт данных.
+      - *Typed* — свой тип, реализующий `error`, с полезными полями:
+
+      ```go
+      type NotFoundError struct{ Key string }
+
+      func (e *NotFoundError) Error() string {
+          return fmt.Sprintf("key %q not found", e.Key)
+      }
+      ```
+
+      Берите typed, когда потребителю нужны детали (какой ключ, какой HTTP-код, retryable ли). Частая ошибка — возвращать `*NotFoundError` как `error`, но забыть, что nil-указатель, завёрнутый в интерфейс, `!= nil` (классическая ловушка typed nil).
+
+      **Кастомный `Is`.** Позволяет одному типу «отвечать да» на несколько sentinel'ов:
+
+      ```go
+      func (e *NotFoundError) Is(target error) bool {
+          return target == ErrNotFound
+      }
+      ```
+
+      **errors.Join (Go 1.20).** Соединяет несколько ошибок в одну, пропуская nil:
+
+      ```go
+      var errs error
+      for _, f := range files {
+          if err := process(f); err != nil {
+              errs = errors.Join(errs, err) // накапливаем, не теряя предыдущие
+          }
+      }
+      return errs // nil, если все прошли
+      ```
+
+      `errors.Is`/`As` работают и по такому «дереву» ошибок — проверяют все ветви. Начиная с Go 1.20 `fmt.Errorf` умеет несколько `%w` в одной строке (`fmt.Errorf("a: %w, b: %w", e1, e2)`), тоже создавая дерево.
+  - level: deep
+    text_md: |
+      **Что происходит внутри.** `fmt.Errorf` с одним `%w` возвращает приватный `*fmt.wrapError` с методом `Unwrap() error`. С несколькими `%w` — `*fmt.wrapErrors` с `Unwrap() []error`. `errors.Join` возвращает `*joinError{ errs []error }`, тоже с `Unwrap() []error`. То есть в Go два вида распаковки:
+
+      ```go
+      Unwrap() error   // линейная цепочка (одна причина)
+      Unwrap() []error // дерево причин (Join, мульти-%w) — с Go 1.20
+      ```
+
+      Упрощённый скелет `errors.Is` показывает, как обходятся оба вида:
+
+      ```go
+      func Is(err, target error) bool {
+          for {
+              if comparable(err) && err == target {
+                  return true
+              }
+              if x, ok := err.(interface{ Is(error) bool }); ok && x.Is(target) {
+                  return true
+              }
+              switch x := err.(type) {
+              case interface{ Unwrap() error }:
+                  err = x.Unwrap()
+                  if err == nil {
+                      return false
+                  }
+              case interface{ Unwrap() []error }:
+                  for _, e := range x.Unwrap() { // обходим все ветви дерева
+                      if Is(e, target) {
+                          return true
+                      }
+                  }
+                  return false
+              default:
+                  return false
+              }
+          }
+      }
+      ```
+
+      Нюанс с `comparable`: сравнение `err == target` на интерфейсах сопоставляет динамический тип и значение и **паникует**, если динамический тип не сравним (например, ошибка со slice-полем). `errors.Is` защищается проверкой сравнимости через reflection, поэтому вручную писать `err == someErr` опасно, а `errors.Is` — безопасно.
+
+      **Эволюция.** До Go 1.13 не было ни `%w`, ни `Is/As` — пользовались `github.com/pkg/errors` (`errors.Wrap`, `Cause`) или сравнивали строки (антипаттерн: `strings.Contains(err.Error(), "not found")` ломается при смене формулировки). Go 1.13 принёс `errors.Is/As/Unwrap` и `%w`; Go 1.20 — `errors.Join`, `Unwrap() []error` и мульти-`%w`, превратив цепочку в дерево.
+
+      **Грабли дизайна в проде.** (1) Оборачивать всё подряд `%w` — тогда деталь реализации нижнего слоя «протекает» в публичный API, и клиенты начинают `errors.Is` на вашу внутреннюю ошибку; иногда правильнее `%v` (порвать цепочку намеренно) или транслировать в свой sentinel. (2) Логировать и одновременно возвращать ошибку — двойное логирование одного факта на каждом уровне стека; логируйте на границе (в хендлере), а вглубь — только оборачивайте с контекстом. (3) Sentinel в hot path через `errors.Is` дешевле typed через `As` (у `As` есть reflection-оверхед), но разница мала — важнее корректность. (4) `errors.Join` не даёт порядка/дедупликации — при накоплении из горутин нужен свой mutex, сам `Join` не потокобезопасен по аргументам. (5) Typed nil: функция с возвратом конкретного `*MyError`, а не `error`, отдав `nil`-указатель в интерфейсном контексте, ломает `if err != nil` — всегда объявляйте возврат как `error`.
+follow_ups:
+  - "Почему errors.Is безопаснее, чем прямое сравнение err == target, для не-comparable ошибок?"
+  - "Как работает мульти-%w и Unwrap() []error, и чем дерево ошибок отличается от линейной цепочки?"
+  - "Когда намеренно НЕ оборачивать ошибку через %w, а порвать цепочку через %v?"
+  - "Что такое typed nil в контексте ошибок и почему возврат *MyError вместо error опасен?"

@@ -1,0 +1,155 @@
+slug: maps-buckets
+topic: go-internals
+title: "Map изнутри: от bucket'ов к Swiss tables"
+minutes: 8
+tags: [map, buckets, runtime]
+body_md: |
+  ## Зачем это знать
+
+  `map` — вторая после слайса структура, которую на собеседовании просят «разобрать изнутри». За вопросом «как устроена map» тянется хвост: почему порядок итерации случайный, почему `&m[k]` не компилируется, что происходит при росте и — с 2025 года — что поменялось в Go 1.24, где классические bucket'ы заменили на Swiss tables. Ответ «это хеш-таблица» засчитывают за junior; senior обязан показать устройство памяти и механику роста. Разберём обе реализации: классическую (её всё ещё полезно понимать) и новую.
+
+  ## Классика: hmap и бакеты (до Go 1.24)
+
+  `map` — это указатель на заголовок `hmap`. В нём лежат `count` (его возвращает `len`), `B` (число бакетов равно `2^B`), указатель `buckets` на массив бакетов, `oldbuckets` для роста и `hash0` — seed, из-за которого хеши, а значит и порядок, меняются от запуска к запуску.
+
+  Каждый бакет — это `bmap` на 8 пар ключ-значение. Важная деталь раскладки: сначала идёт массив из 8 `tophash` (по одному байту), потом 8 ключей подряд, потом 8 значений подряд — не парами. Раздельные группы экономят padding: между `int64`-ключом и `bool`-значением не пришлось бы вставлять выравнивание. `tophash[i]` хранит старший байт хеша ключа — по нему быстро отсеивают слоты, не сравнивая ключи целиком, а также кодируют служебные состояния (пустой, эвакуированный).
+
+  <svg viewBox="0 0 720 224" role="img" aria-label="Устройство map до Go 1.24: заголовок hmap указывает на массив бакетов, каждый bmap хранит tophash, ключи, значения и overflow">
+    <defs>
+      <marker id="mp-arw1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+    </defs>
+    <rect x="24" y="46" width="150" height="150" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+    <text x="99" y="70" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#242424">hmap</text>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#242424">
+      <text x="40" y="98">count · len(m)</text>
+      <text x="40" y="122">B → 2^B бакетов</text>
+      <text x="40" y="146">buckets ●</text>
+      <text x="40" y="170" fill="#757575">oldbuckets</text>
+      <text x="40" y="190" fill="#757575">hash0 (seed)</text>
+    </g>
+    <path d="M150 142 L206 118" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#mp-arw1)"/>
+    <text x="210" y="84" font-family="system-ui, sans-serif" font-size="13" fill="#757575">buckets []bmap</text>
+    <g>
+      <rect x="210" y="92" width="44" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="254" y="92" width="44" height="44" rx="6" fill="#0D7680" stroke="#0D7680"/>
+      <rect x="298" y="92" width="44" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="342" y="92" width="44" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+    </g>
+    <path d="M276 92 L440 78" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#mp-arw1)"/>
+    <rect x="446" y="40" width="250" height="150" rx="6" fill="none" stroke="#0D7680"/>
+    <text x="571" y="60" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#242424">bmap (один бакет)</text>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#242424">
+      <rect x="458" y="72" width="226" height="26" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="571" y="89" text-anchor="middle">tophash ×8 — старший байт хеша</text>
+      <rect x="458" y="102" width="226" height="26" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="571" y="119" text-anchor="middle">keys ×8</text>
+      <rect x="458" y="132" width="226" height="26" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="571" y="149" text-anchor="middle">values ×8</text>
+      <rect x="458" y="162" width="226" height="26" rx="6" fill="none" stroke="#757575"/>
+      <text x="571" y="179" text-anchor="middle" fill="#757575">overflow → следующий bmap</text>
+    </g>
+  </svg>
+
+  Ключ ищется так: младшие `B` бит хеша выбирают номер бакета, старший байт кладётся или сравнивается в `tophash`. Если все 8 слотов заняты — к бакету подцепляется overflow-бакет (связный список). Отсюда правило: `&m[k]` запрещён компилятором, потому что при росте значение физически переезжает в другую память, и адрес мгновенно бы протух.
+
+  ## Рост и инкрементальная эвакуация
+
+  Когда среднее заполнение превышает load factor 6.5 (`count > 6.5 · 2^B`), число бакетов удваивается. Но копирования «всё сразу» не происходит — это дало бы неприемлемые паузы на больших map. Вместо этого старый массив переезжает в `oldbuckets`, выделяется новый вдвое больший `buckets`, а сама эвакуация инкрементальная: при каждой записи или удалении `growWork` перевозит один-два старых бакета в новый.
+
+  <svg viewBox="0 0 720 224" role="img" aria-label="Инкрементальная эвакуация при росте map: старые бакеты по одному переезжают в новый массив вдвое большего размера, расщепляясь на направления X и Y">
+    <defs>
+      <marker id="mp-arw2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+    </defs>
+    <text x="30" y="18" font-family="system-ui, sans-serif" font-size="14" fill="#242424">Рост: удвоение бакетов при load factor 6.5</text>
+    <text x="30" y="38" font-family="system-ui, sans-serif" font-size="13" fill="#757575">oldbuckets (старый массив)</text>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#242424">
+      <rect x="30" y="44" width="76" height="46" rx="6" fill="#E6E6E6" stroke="#E6E6E6"/>
+      <text x="68" y="72" text-anchor="middle" fill="#757575">эвак.</text>
+      <rect x="106" y="44" width="76" height="46" rx="6" fill="#E6E6E6" stroke="#E6E6E6"/>
+      <text x="144" y="72" text-anchor="middle" fill="#757575">эвак.</text>
+      <rect x="182" y="44" width="76" height="46" rx="6" fill="#0D7680" stroke="#0D7680"/>
+      <text x="220" y="72" text-anchor="middle" fill="#FFFFFF">b2</text>
+      <rect x="258" y="44" width="76" height="46" rx="6" fill="none" stroke="#0D7680"/>
+      <text x="296" y="72" text-anchor="middle">b3</text>
+    </g>
+    <path d="M212 90 L200 146" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#mp-arw2)"/>
+    <path d="M232 90 L470 146" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#mp-arw2)"/>
+    <text x="196" y="122" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">X</text>
+    <text x="372" y="118" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">Y (старший бит хеша)</text>
+    <text x="30" y="140" font-family="system-ui, sans-serif" font-size="13" fill="#757575">buckets (новый массив, 2×)</text>
+    <g>
+      <rect x="30" y="148" width="68" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="98" y="148" width="68" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="166" y="148" width="68" height="46" rx="6" fill="#0D7680" stroke="#0D7680"/>
+      <rect x="234" y="148" width="68" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="302" y="148" width="68" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="370" y="148" width="68" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="438" y="148" width="68" height="46" rx="6" fill="#0D7680" stroke="#0D7680"/>
+      <rect x="506" y="148" width="68" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+    </g>
+    <text x="30" y="214" font-family="system-ui, sans-serif" font-size="13" fill="#757575">growWork переносит 1–2 бакета за каждую запись или удаление</text>
+  </svg>
+
+  Пока идёт рост, чтение обязано смотреть и в старый, и в новый массив. Каждый старый бакет при эвакуации расщепляется на два «направления» X и Y — по старшему из новых бит хеша решается, в какую половину нового массива поедет ключ. Есть и особый случай `sameSizeGrow`: если бакетов много, но они забиты overflow-цепочками после массовых удалений, map «переупаковывается» в тот же размер, уплотняя данные без роста.
+
+  ## Go 1.24: Swiss tables
+
+  В Go 1.24 реализацию `map` заменили на Swiss table — это открытая адресация вместо цепочек overflow. Данные лежат группами по 8 слотов (`abi.SwissMapGroupSlots = 8`), и у каждой группы есть одно 8-байтное (64-битное) control-слово: по одному байту-контроллеру на слот. В байте — 7 бит хеша плюс бит статуса (занят/пуст/удалён).
+
+  <svg viewBox="0 0 720 205" role="img" aria-label="Swiss table в Go 1.24: группа из восьми слотов и одно 64-битное control-слово, поиск приёмом SWAR">
+    <defs>
+      <marker id="mp-arw3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+    </defs>
+    <text x="30" y="18" font-family="system-ui, sans-serif" font-size="14" fill="#242424">Go 1.24: Swiss table — открытая адресация, группа из 8 слотов</text>
+    <text x="30" y="37" font-family="system-ui, sans-serif" font-size="13" fill="#757575">control-слово = 64 бита = 8 байт: в каждом 1 бит статуса + 7 бит хеша</text>
+    <g>
+      <rect x="30" y="48" width="76" height="38" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="106" y="48" width="76" height="38" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="182" y="48" width="76" height="38" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="258" y="48" width="76" height="38" rx="6" fill="#0D7680" stroke="#0D7680"/>
+      <rect x="334" y="48" width="76" height="38" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="410" y="48" width="76" height="38" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="486" y="48" width="76" height="38" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="562" y="48" width="76" height="38" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+    </g>
+    <path d="M296 88 L296 116" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#mp-arw3)"/>
+    <text x="340" y="106" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">совпал 7-битный хеш → слот 3</text>
+    <text x="30" y="112" font-family="system-ui, sans-serif" font-size="13" fill="#757575">slots ×8</text>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#242424">
+      <rect x="30" y="118" width="76" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="106" y="118" width="76" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="182" y="118" width="76" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="258" y="118" width="76" height="44" rx="6" fill="#0D7680" stroke="#0D7680"/>
+      <rect x="334" y="118" width="76" height="44" rx="6" fill="none" stroke="#E6E6E6"/>
+      <rect x="410" y="118" width="76" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="486" y="118" width="76" height="44" rx="6" fill="none" stroke="#E6E6E6"/>
+      <rect x="562" y="118" width="76" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="296" y="145" text-anchor="middle" fill="#FFFFFF">k,v</text>
+    </g>
+    <text x="30" y="188" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">SWAR: одно сравнение 64-битного слова проверяет все 8 слотов сразу</text>
+  </svg>
+
+  Фокус в том, как ищут по группе. Вместо цикла по 8 слотам берут 64-битное control-слово и параллельно проверяют все 8 байт сразу — приёмом SWAR (SIMD within a register): битовые трюки над одним словом, а не настоящие SIMD-инструкции. Важно не переврать на собеседовании: вариант с 16 слотами и SSE — это оригинальный abseil на C++, которого в Go-порте нет; в Go именно 8 слотов и 64-битное слово. Результат — быстрее доступ и меньше памяти на больших map при полностью сохранённой семантике языка: порядок по-прежнему случайный, значения не адресуемы, потокобезопасности нет.
+
+  ## Типичные заблуждения
+
+  - «В бакете ключи и значения лежат парами» — нет, отдельными группами (8 ключей, потом 8 значений) ради выравнивания.
+  - «При росте map копируется целиком за один раз» — эвакуация инкрементальная, размазана по последующим записям и удалениям.
+  - «Порядок итерации случаен из-за хеша» — не только: `range` дополнительно стартует со случайного бакета и смещения, это осознанная защита от того, чтобы на порядок закладывались.
+  - «Go 1.24 использует 16-слотные группы и SSE, как в abseil» — нет, в Go-порте 8 слотов и SWAR над 64-битным словом.
+  - «`map` можно читать из нескольких горутин с параллельной записью» — нет: рантайм ловит это флагом и роняет процесс `fatal error`, которую нельзя перехватить `recover`.
+
+  ## Что отвечать на собеседовании
+
+  - Классика: `hmap` + массив бакетов по 8 слотов; `tophash` (старший байт хеша) для быстрого отсева; переполнение — overflow-бакеты.
+  - Рост при load factor 6.5 удваивает число бакетов, эвакуация инкрементальная через `growWork`, с расщеплением на направления X/Y.
+  - Значения не адресуемы (`&m[k]` не компилируется), потому что при эвакуации переезжают; порядок итерации намеренно случаен.
+  - Go 1.24: Swiss table, группы по 8 слотов и 64-битное control-слово, поиск через SWAR; семантика языка не изменилась. Для конкурентного доступа — `sync.Map` или `map` под `RWMutex`.
+related_questions: [map-internals-buckets, sync-once-pool-map, struct-memory-alignment-padding]
+related_tasks: [lru-cache]

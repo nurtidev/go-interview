@@ -1,0 +1,10 @@
+# Frontend deps / build output
+web/node_modules/
+web/dist/
+
+# Runtime data
+data/
+*.db
+
+# VCS
+.git

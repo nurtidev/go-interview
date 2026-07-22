@@ -1,0 +1,139 @@
+slug: networking-for-go
+topic: networks
+title: "Путь HTTP-запроса: от TCP до хендлера"
+minutes: 8
+tags: [networking, http, tcp, tls]
+body_md: |
+  ## Зачем это знать
+
+  `http.ListenAndServe(":8080", handler)` — три слова, за которыми прячется целый стек: TCP-сегменты, TLS-рукопожатие, системные вызовы, планировщик Go и, наконец, ваш хендлер. На senior/staff-собеседовании любят «пройти» этот путь целиком: по ответу видно, понимаете ли вы, где рождается latency, почему keep-alive экономит время, откуда берётся «too many open files» и чем HTTP/2 лучше под нагрузкой. Разобравшись один раз, вы перестаёте гадать, когда сервис упирается в лимит соединений, а когда — в CPU.
+
+  ## TCP-рукопожатие, а поверх — TLS
+
+  Прежде чем уйдёт хоть один байт HTTP, стороны должны договориться. Но ещё раньше клиент превращает имя хоста в IP через DNS-запрос (обычно UDP) — это тоже round-trip, который прячется за кэшированием и всплывает в latency в основном на «холодных» вызовах. Дальше TCP делает three-way handshake: клиент шлёт SYN со своим начальным номером последовательности, сервер отвечает SYN-ACK, клиент подтверждает ACK. Только теперь соединение установлено — это минимум один round-trip (RTT) чистой задержки, ещё до запроса.
+
+  Если это HTTPS, поверх TCP надстраивается TLS. Клиент шлёт ClientHello (версии, шифронаборы), сервер — ServerHello с сертификатом, стороны согласуют ключи и обе отправляют Finished. В TLS 1.2 это ещё 2 RTT, в TLS 1.3 — уже 1 RTT, а при 0-RTT resumption — почти даром. Вот почему «холодное» HTTPS-соединение дорогое, а keep-alive и переиспользование соединений так важны: рукопожатие платится один раз на много запросов.
+
+  <svg viewBox="0 0 720 350" role="img" aria-label="Установка соединения: сначала TCP three-way handshake, затем TLS-хендшейк, и только потом HTTP-запрос и ответ">
+  <defs>
+  <marker id="n9a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#6B675E"/>
+  </marker>
+  </defs>
+  <rect x="28" y="64" width="664" height="84" rx="6" fill="#E6F1E9" stroke="#E8E4DC" stroke-width="1.5"/>
+  <rect x="28" y="156" width="664" height="100" rx="6" fill="#F7EEDA" stroke="#E8E4DC" stroke-width="1.5"/>
+  <rect x="60" y="14" width="140" height="36" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="130" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#26241F">Клиент</text>
+  <rect x="520" y="14" width="140" height="36" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="590" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#26241F">Сервер</text>
+  <line x1="130" y1="50" x2="130" y2="338" stroke="#E8E4DC" stroke-width="1.5"/>
+  <line x1="590" y1="50" x2="590" y2="338" stroke="#E8E4DC" stroke-width="1.5"/>
+  <text x="40" y="80" font-family="system-ui, sans-serif" font-size="13" fill="#6B675E">1 · TCP: 3-way handshake</text>
+  <line x1="130" y1="98" x2="586" y2="98" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9a)"/>
+  <text x="360" y="93" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">SYN</text>
+  <line x1="590" y1="120" x2="134" y2="120" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9a)"/>
+  <text x="360" y="115" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">SYN-ACK</text>
+  <line x1="130" y1="142" x2="586" y2="142" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9a)"/>
+  <text x="360" y="137" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">ACK · соединение установлено</text>
+  <text x="40" y="174" font-family="system-ui, sans-serif" font-size="13" fill="#6B675E">2 · TLS: согласование ключей</text>
+  <line x1="130" y1="192" x2="586" y2="192" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9a)"/>
+  <text x="360" y="187" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">ClientHello</text>
+  <line x1="590" y1="218" x2="134" y2="218" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9a)"/>
+  <text x="360" y="213" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">ServerHello · сертификат</text>
+  <line x1="130" y1="244" x2="586" y2="244" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9a)"/>
+  <text x="360" y="239" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">обмен ключами · Finished</text>
+  <text x="40" y="276" font-family="system-ui, sans-serif" font-size="13" fill="#6B675E">3 · HTTP поверх шифрованного канала</text>
+  <line x1="130" y1="296" x2="586" y2="296" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9a)"/>
+  <text x="360" y="291" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">GET /orders HTTP/1.1</text>
+  <line x1="590" y1="322" x2="134" y2="322" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9a)"/>
+  <text x="360" y="317" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">200 OK · тело ответа</text>
+  </svg>
+
+  ## Что делает Go-сервер: от Accept до handler
+
+  На входе `net/http` держит `net.Listener` и в цикле вызывает `Accept()`. Каждое принятое соединение уходит в отдельную горутину — `go c.serve()`. Это и есть модель «горутина на соединение»: тысячи одновременных клиентов — тысячи дешёвых горутин, а не тысячи потоков ОС.
+
+  Внутри `serve` горутина читает байты из сокета, парсит строку запроса и заголовки в `*http.Request`, затем `ServeMux` (роутер) по пути выбирает нужный обработчик и вызывает `handler(w, r)`. Ответ пишется в тот же `conn`.
+
+  Ключевой момент — что происходит, когда данных в сокете ещё нет. Горутина не крутит поток вхолостую и не блокирует поток ОС: рантайм регистрирует дескриптор в epoll (netpoller) и паркует горутину. Поток M освобождается и выполняет другие горутины. Когда пакет придёт, netpoller разбудит именно эту горутину. Поэтому Go держит десятки тысяч медленных соединений на горстке потоков — блокирующий с виду `conn.Read()` на самом деле неблокирующий для планировщика.
+
+  <svg viewBox="0 0 720 250" role="img" aria-label="Путь запроса внутри Go-сервера: ядро принимает TCP-сегмент, Listener.Accept отдаёт соединение горутине, которая вызывает handler; медленные чтения паркуются в netpoller">
+  <defs>
+  <marker id="n9b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#6B675E"/>
+  </marker>
+  </defs>
+  <rect x="20" y="44" width="150" height="58" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="95" y="70" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">Ядро ОС</text>
+  <text x="95" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">TCP-сегмент :443</text>
+  <rect x="195" y="44" width="150" height="58" rx="6" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="270" y="70" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">Listener.Accept()</text>
+  <text x="270" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">возвращает net.Conn</text>
+  <rect x="370" y="44" width="150" height="58" rx="6" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="445" y="70" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">go conn.serve()</text>
+  <text x="445" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">горутина на соединение</text>
+  <rect x="545" y="44" width="155" height="58" rx="6" fill="#F7EEDA" stroke="#26241F" stroke-width="1.5"/>
+  <text x="622" y="70" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">handler(w, r)</text>
+  <text x="622" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">ваш код</text>
+  <line x1="170" y1="73" x2="193" y2="73" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9b)"/>
+  <line x1="345" y1="73" x2="368" y2="73" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9b)"/>
+  <line x1="520" y1="73" x2="543" y2="73" stroke="#6B675E" stroke-width="1.5" marker-end="url(#n9b)"/>
+  <rect x="350" y="160" width="190" height="54" rx="6" fill="#EDEAE3" stroke="#26241F" stroke-width="1.5"/>
+  <text x="445" y="184" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#26241F">netpoller · epoll</text>
+  <text x="445" y="202" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">будит горутину при данных</text>
+  <line x1="415" y1="104" x2="415" y2="158" stroke="#6B675E" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#n9b)"/>
+  <line x1="475" y1="158" x2="475" y2="104" stroke="#6B675E" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#n9b)"/>
+  <text x="405" y="136" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">паркуется</text>
+  <text x="485" y="136" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">просыпается</text>
+  <text x="20" y="238" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">Медленные соединения спят в epoll — потоки ОС не блокируются.</text>
+  </svg>
+
+  Отсюда два практических следствия. Во-первых, каждое соединение — это открытый файловый дескриптор, а их число ограничено `ulimit -n`; под нагрузкой ошибка «too many open files» означает, что вы упёрлись в лимит дескрипторов, а не в CPU. Во-вторых, без таймаутов медленный или зависший клиент вечно держит горутину и дескриптор — поэтому в проде всегда задают `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` и `IdleTimeout`, а долгие операции в хендлере отменяют через `r.Context()`, который закрывается, когда клиент отвалился.
+
+  ## HTTP/1.1 против HTTP/2
+
+  В HTTP/1.1 на одном соединении запросы идут по очереди: следующий ответ не начнётся, пока не завершился предыдущий — это head-of-line blocking. Браузеры обходят проблему, открывая ~6 параллельных соединений на хост, но каждое соединение — это отдельный TCP+TLS handshake и своя память на сервере.
+
+  HTTP/2 решает это мультиплексированием: одно TCP-соединение несёт много логических потоков (streams), а данные режутся на бинарные фреймы, которые чередуются. Три запроса едут «параллельно» по одному сокету, без гонки за соединения. Плюс сжатие заголовков (HPACK) и server push. Важная тонкость: HTTP/2 всё ещё поверх одного TCP, поэтому потерянный пакет тормозит все потоки сразу (head-of-line на уровне TCP) — это уже лечит HTTP/3 поверх QUIC/UDP.
+
+  <svg viewBox="0 0 720 250" role="img" aria-label="Сравнение HTTP/1.1 и HTTP/2: в HTTP/1.1 запросы на соединении идут по очереди с блокировкой начала очереди, в HTTP/2 потоки мультиплексируются в одном сокете и идут одновременно">
+  <rect x="20" y="40" width="320" height="188" rx="6" fill="none" stroke="#26241F" stroke-width="1.5"/>
+  <text x="180" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#26241F">HTTP/1.1 · очередь на соединении</text>
+  <text x="30" y="99" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">R1</text>
+  <rect x="110" y="86" width="68" height="22" rx="3" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="30" y="137" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">R2</text>
+  <rect x="110" y="124" width="68" height="22" rx="3" fill="#EDEAE3" stroke="#BE4238" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <rect x="180" y="124" width="68" height="22" rx="3" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="30" y="175" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">R3</text>
+  <rect x="110" y="162" width="138" height="22" rx="3" fill="#EDEAE3" stroke="#BE4238" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <rect x="250" y="162" width="68" height="22" rx="3" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="110" y="204" font-family="system-ui, sans-serif" font-size="11" fill="#6B675E">время →</text>
+  <text x="30" y="220" font-family="system-ui, sans-serif" font-size="12" fill="#BE4238">пунктир — ждёт впереди идущий запрос (head-of-line)</text>
+  <rect x="380" y="40" width="320" height="188" rx="6" fill="none" stroke="#26241F" stroke-width="1.5"/>
+  <text x="540" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#26241F">HTTP/2 · потоки в одном сокете</text>
+  <text x="392" y="99" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">S1</text>
+  <rect x="430" y="86" width="250" height="22" rx="3" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="392" y="137" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">S2</text>
+  <rect x="430" y="124" width="258" height="22" rx="3" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="392" y="175" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">S3</text>
+  <rect x="430" y="162" width="245" height="22" rx="3" fill="#E6F1E9" stroke="#26241F" stroke-width="1.5"/>
+  <text x="430" y="204" font-family="system-ui, sans-serif" font-size="11" fill="#6B675E">время →</text>
+  <text x="392" y="220" font-family="system-ui, sans-serif" font-size="12" fill="#6B675E">все потоки едут одновременно по одному TCP</text>
+  </svg>
+
+  ## Типичные заблуждения
+
+  - **«Go под каждый запрос создаёт поток».** Нет: под каждое соединение — горутину, а горутины мультиплексируются на несколько потоков через netpoller.
+  - **«TLS-рукопожатие — это часть TCP».** Нет, это отдельный слой поверх уже установленного TCP; их RTT складываются.
+  - **«HTTP/2 быстрее, потому что открывает несколько соединений».** Наоборот: одно соединение, много потоков внутри него.
+  - **«`conn.Read` блокирует поток».** Для программиста — да, для рантайма — нет: горутина паркуется, поток свободен.
+  - **«keep-alive — микрооптимизация».** На HTTPS переиспользование соединения экономит целые RTT рукопожатий на каждом запросе.
+
+  ## Что отвечать на собеседовании
+
+  - Пройдите путь по слоям: **TCP handshake** (SYN/SYN-ACK/ACK) → **TLS** (ClientHello/ServerHello/ключи) → **HTTP-запрос** → `handler`.
+  - Скажите про модель **«горутина на соединение»** и **netpoller**: почему Go держит десятки тысяч соединений дёшево, не блокируя потоки.
+  - Объясните **head-of-line blocking** в HTTP/1.1 и **мультиплексирование потоков** в HTTP/2 (и что это по-прежнему одно TCP-соединение).
+  - Упомяните стоимость рукопожатий в **RTT** и роль **keep-alive / TLS 1.3** — это показывает, что вы думаете о latency, а не только о фичах протокола.
+related_questions: [tcp-udp-handshake-timewait, http1-http2-http3-multiplexing, http-keepalive-connection-pool, tls-handshake-mtls]
+related_tasks: [http-middleware-chain, retry-backoff-jitter]

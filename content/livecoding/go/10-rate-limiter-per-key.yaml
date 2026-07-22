@@ -1,0 +1,189 @@
+slug: rate-limiter-per-key
+kind: go
+title: "Rate limiter по ключу (скользящее окно)"
+difficulty: senior
+tags: [rate-limiter, sliding-window, concurrency]
+statement_md: |
+  Реализуйте потокобезопасный ограничитель частоты с **отдельным лимитом на
+  каждый ключ** (например, per-IP или per-API-token). Алгоритм — скользящее окно:
+  за любой промежуток длиной `window` для одного ключа допускается не более
+  `limit` запросов.
+
+  ```go
+  func NewSlidingWindowLimiter(limit int, window time.Duration) *SlidingWindowLimiter
+  func (l *SlidingWindowLimiter) Allow(key string, now time.Time) bool
+  ```
+
+  Требования:
+
+  - `Allow(key, now)` возвращает `true`, если с учётом уже пропущенных запросов в
+    окне `(now-window, now]` лимит для `key` не превышен, и «занимает» слот; иначе
+    `false`.
+  - Разные ключи независимы.
+  - Время подаётся параметром `now` (удобно тестировать без `time.Sleep`).
+  - Вызовы конкурентны (проверяется под `-race`).
+
+  Постановка отличается от классического token bucket: здесь именно журнал отметок
+  времени в скользящем окне, отдельный для каждого ключа.
+starter_code: |
+  package main
+
+  import "time"
+
+  // SlidingWindowLimiter ограничивает число запросов на ключ в скользящем окне.
+  type SlidingWindowLimiter struct {
+      // TODO: limit, window, история отметок времени по ключу, mutex
+  }
+
+  // NewSlidingWindowLimiter: не более limit запросов на ключ за окно window.
+  func NewSlidingWindowLimiter(limit int, window time.Duration) *SlidingWindowLimiter {
+      // TODO
+      return &SlidingWindowLimiter{}
+  }
+
+  // Allow сообщает, можно ли пропустить запрос по ключу key в момент now.
+  func (l *SlidingWindowLimiter) Allow(key string, now time.Time) bool {
+      // TODO
+      return false
+  }
+hints:
+  - "Для каждого ключа держите отметки времени пропущенных запросов. Перед решением отбросьте те, что старше now-window, — они уже вне окна."
+  - "Отметки в пределах ключа идут по возрастанию времени, значит устаревшие — это префикс: сдвигайте начало среза, пока times[i] <= cutoff, где cutoff = now-window."
+  - "После очистки: если осталось >= limit отметок — отказ; иначе допишите now и разрешите. Всё под одним sync.Mutex, потому что чтение журнала и его модификация должны быть атомарны."
+solution_md: |
+  ### Идея
+
+  Скользящее окно на журнале отметок: для каждого ключа храним времена
+  пропущенных запросов. При `Allow(key, now)` сначала отбрасываем отметки старше
+  `cutoff = now - window` (они вне окна). Так как отметки добавляются по
+  возрастанию времени, устаревшие — это префикс, и достаточно сдвинуть начало
+  среза.
+
+  Если после очистки в окне уже `limit` отметок — отказываем. Иначе дописываем
+  `now` и разрешаем. Чтение журнала и его изменение — одна атомарная операция,
+  поэтому всё под `sync.Mutex`.
+
+  Время передаём аргументом: это делает поведение детерминированным и тестируемым
+  без `time.Sleep` и реальных таймеров.
+
+  ### Эталонное решение
+
+  ```go
+  import (
+      "sync"
+      "time"
+  )
+
+  type SlidingWindowLimiter struct {
+      mu     sync.Mutex
+      limit  int
+      window time.Duration
+      hits   map[string][]time.Time
+  }
+
+  func NewSlidingWindowLimiter(limit int, window time.Duration) *SlidingWindowLimiter {
+      return &SlidingWindowLimiter{
+          limit:  limit,
+          window: window,
+          hits:   make(map[string][]time.Time),
+      }
+  }
+
+  func (l *SlidingWindowLimiter) Allow(key string, now time.Time) bool {
+      l.mu.Lock()
+      defer l.mu.Unlock()
+
+      cutoff := now.Add(-l.window)
+      times := l.hits[key]
+      i := 0
+      for i < len(times) && !times[i].After(cutoff) {
+          i++
+      }
+      times = times[i:]
+
+      if len(times) >= l.limit {
+          l.hits[key] = times
+          return false
+      }
+      times = append(times, now)
+      l.hits[key] = times
+      return true
+  }
+  ```
+
+  Сложность: Амортизированно `O(1)` на запрос (каждая отметка добавляется и удаляется один раз); память — `O(число запросов в окне)` на ключ.
+
+  ### Типичные ошибки на интервью
+
+  - Считать запросы в фиксированном окне (fixed window) — тогда на стыке окон проходит до 2*limit за короткий интервал.
+  - Не чистить журнал неактивных ключей — память растёт; в проде нужна фоновая эвикция «молчащих» ключей.
+  - Читать журнал вне блокировки, а решение принимать под ней — гонка; проверка и запись должны быть атомарны.
+  - Перепутать строгость сравнения с cutoff и «терять» либо «продлевать» ровно граничные отметки.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestLimiterBasicWindow(t *testing.T) {
+      l := NewSlidingWindowLimiter(3, time.Second)
+      base := time.Unix(1000, 0)
+      // Первые три в окне разрешены, четвёртый — нет.
+      for i := 0; i < 3; i++ {
+          if !l.Allow("a", base) {
+              t.Fatalf("request %d must be allowed", i)
+          }
+      }
+      if l.Allow("a", base) {
+          t.Fatalf("4th request in window must be denied")
+      }
+      // Через окно старые события истекают — снова можно.
+      if !l.Allow("a", base.Add(1100*time.Millisecond)) {
+          t.Fatalf("request after window must be allowed")
+      }
+  }
+
+  func TestLimiterPerKeyIsolation(t *testing.T) {
+      l := NewSlidingWindowLimiter(1, time.Second)
+      now := time.Unix(2000, 0)
+      if !l.Allow("ip1", now) {
+          t.Fatalf("ip1 first must be allowed")
+      }
+      if l.Allow("ip1", now) {
+          t.Fatalf("ip1 second must be denied")
+      }
+      // Другой ключ имеет собственный бюджет.
+      if !l.Allow("ip2", now) {
+          t.Fatalf("ip2 first must be allowed")
+      }
+  }
+
+  func TestLimiterConcurrentSameKey(t *testing.T) {
+      const (
+          limit      = 100
+          goroutines = 500
+      )
+      l := NewSlidingWindowLimiter(limit, time.Second)
+      now := time.Unix(3000, 0)
+      var allowed int64
+      var wg sync.WaitGroup
+      for g := 0; g < goroutines; g++ {
+          wg.Add(1)
+          go func() {
+              defer wg.Done()
+              if l.Allow("shared", now) {
+                  atomic.AddInt64(&allowed, 1)
+              }
+          }()
+      }
+      wg.Wait()
+      if got := atomic.LoadInt64(&allowed); got != limit {
+          t.Fatalf("allowed = %d, want exactly %d", got, limit)
+      }
+  }

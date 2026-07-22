@@ -1,0 +1,275 @@
+slug: circuit-breaker
+kind: go
+title: "Circuit Breaker"
+difficulty: senior
+tags: [circuit-breaker, resilience, state-machine]
+statement_md: |
+  Внешняя зависимость периодически падает. Реализуйте Circuit Breaker, чтобы не
+  ждать таймаут на каждом вызове, а быстро отдавать ошибку, пока сервис лежит.
+
+  Состояния:
+
+  - `Closed` — пропускаем вызовы, считаем подряд идущие ошибки.
+  - `Open` — сразу возвращаем `ErrCircuitOpen` (fast fail), не вызывая функцию.
+  - `HalfOpen` — по истечении `resetTimeout` пропускаем один пробный вызов.
+
+  ```go
+  func NewCircuitBreaker(maxFailures int, resetTimeout time.Duration) *CircuitBreaker
+  func (cb *CircuitBreaker) Execute(fn func() error) error
+  func (cb *CircuitBreaker) State() State  // StateClosed | StateOpen | StateHalfOpen
+  ```
+
+  Требования:
+
+  - После `maxFailures` подряд ошибок цепь размыкается (`Open`).
+  - В `Open` вызовы не доходят до `fn`, возвращается `ErrCircuitOpen`.
+  - Через `resetTimeout` брейкер переходит в `HalfOpen` и пропускает один пробный
+    вызов: успех → `Closed`, ошибка → снова `Open`.
+  - Безопасен при конкурентных вызовах (проверяется под `-race`).
+starter_code: |
+  package main
+
+  import (
+      "errors"
+      "time"
+  )
+
+  type State int
+
+  const (
+      StateClosed State = iota
+      StateOpen
+      StateHalfOpen
+  )
+
+  // ErrCircuitOpen возвращается, когда цепь разомкнута (fast fail).
+  var ErrCircuitOpen = errors.New("circuit breaker is open")
+
+  // CircuitBreaker — автомат Closed -> Open -> HalfOpen для защиты от лавины
+  // ошибок внешней зависимости.
+  type CircuitBreaker struct {
+      // TODO: состояние, счётчик ошибок, порог, resetTimeout, момент размыкания, mutex
+      maxFailures  int
+      resetTimeout time.Duration
+  }
+
+  // NewCircuitBreaker: размыкает цепь после maxFailures подряд ошибок,
+  // пробует восстановление через resetTimeout.
+  func NewCircuitBreaker(maxFailures int, resetTimeout time.Duration) *CircuitBreaker {
+      return &CircuitBreaker{maxFailures: maxFailures, resetTimeout: resetTimeout}
+  }
+
+  // State возвращает текущее состояние (с учётом истёкшего resetTimeout).
+  func (cb *CircuitBreaker) State() State {
+      // TODO
+      return StateClosed
+  }
+
+  // Execute вызывает fn через брейкер, обновляя состояние по результату.
+  func (cb *CircuitBreaker) Execute(fn func() error) error {
+      // TODO
+      return nil
+  }
+hints:
+  - "Состояние + счётчик ошибок + момент размыкания меняются согласованно — держите их под одним sync.Mutex, а не в разрозненных atomic."
+  - "Переход Open → HalfOpen вычисляйте лениво при обращении: если state == Open и с момента размыкания прошло >= resetTimeout, считаем состояние HalfOpen."
+  - "В HalfOpen пропустите только ОДИН пробный вызов: перед вызовом fn временно верните состояние в Open (чтобы параллельные вызовы делали fast fail), а по результату — Closed при успехе или Open при ошибке. Сам fn вызывайте вне блокировки."
+solution_md: |
+  ### Идея
+
+  Брейкер — конечный автомат на трёх состояниях под одним `sync.Mutex`
+  (состояние, счётчик ошибок и время размыкания меняются вместе, поэтому atomic
+  здесь неудобны).
+
+  Переход `Open → HalfOpen` вычисляем лениво: при обращении, если с момента
+  размыкания прошло `resetTimeout`, считаем состояние полуоткрытым. В `HalfOpen`
+  пропускаем ровно один пробный вызов — для этого перед вызовом переводим
+  состояние обратно в `Open`, чтобы конкурентные вызовы делали fast fail и не
+  било сразу несколько пробников. Функцию `fn` вызываем вне блокировки, иначе
+  долгий вызов держал бы мьютекс.
+
+  По результату: ошибка увеличивает счётчик и (при достижении порога) размыкает
+  цепь; успех обнуляет счётчик и закрывает её.
+
+  ### Эталонное решение
+
+  ```go
+  import (
+      "errors"
+      "sync"
+      "time"
+  )
+
+  type State int
+
+  const (
+      StateClosed State = iota
+      StateOpen
+      StateHalfOpen
+  )
+
+  var ErrCircuitOpen = errors.New("circuit breaker is open")
+
+  type CircuitBreaker struct {
+      mu           sync.Mutex
+      state        State
+      failures     int
+      maxFailures  int
+      resetTimeout time.Duration
+      openedAt     time.Time
+  }
+
+  func NewCircuitBreaker(maxFailures int, resetTimeout time.Duration) *CircuitBreaker {
+      if maxFailures < 1 {
+          maxFailures = 1
+      }
+      return &CircuitBreaker{
+          state:        StateClosed,
+          maxFailures:  maxFailures,
+          resetTimeout: resetTimeout,
+      }
+  }
+
+  // currentState предполагает, что mutex уже захвачен. Переводит Open -> HalfOpen,
+  // когда истёк resetTimeout.
+  func (cb *CircuitBreaker) currentState() State {
+      if cb.state == StateOpen && time.Since(cb.openedAt) >= cb.resetTimeout {
+          cb.state = StateHalfOpen
+      }
+      return cb.state
+  }
+
+  func (cb *CircuitBreaker) State() State {
+      cb.mu.Lock()
+      defer cb.mu.Unlock()
+      return cb.currentState()
+  }
+
+  func (cb *CircuitBreaker) Execute(fn func() error) error {
+      cb.mu.Lock()
+      switch cb.currentState() {
+      case StateOpen:
+          cb.mu.Unlock()
+          return ErrCircuitOpen
+      case StateHalfOpen:
+          // Пропускаем только один пробный вызов; параллельные — fast fail.
+          cb.state = StateOpen
+          cb.openedAt = time.Now()
+      }
+      cb.mu.Unlock()
+
+      err := fn()
+
+      cb.mu.Lock()
+      defer cb.mu.Unlock()
+      if err != nil {
+          cb.failures++
+          cb.openedAt = time.Now()
+          if cb.failures >= cb.maxFailures {
+              cb.state = StateOpen
+          }
+          return err
+      }
+      cb.failures = 0
+      cb.state = StateClosed
+      return nil
+  }
+  ```
+
+  Сложность: `Execute` — `O(1)` плюс стоимость `fn`; накладные расходы — один мьютекс.
+
+  ### Типичные ошибки на интервью
+
+  - Вызывать fn под захваченным мьютексом — блокируете весь брейкер на время внешнего вызова.
+  - В HalfOpen пропустить сразу все конкурентные вызовы вместо одного пробного.
+  - Хранить состояние и счётчик в разных atomic без общей блокировки — рассогласование при гонке.
+  - Не сбрасывать счётчик ошибок после успешного вызова.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "errors"
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestBreakerOpensAndFastFails(t *testing.T) {
+      cb := NewCircuitBreaker(2, 50*time.Millisecond)
+      boom := errors.New("boom")
+      calls := 0
+      failing := func() error { calls++; return boom }
+
+      if err := cb.Execute(failing); !errors.Is(err, boom) {
+          t.Fatalf("1st call err = %v, want boom", err)
+      }
+      if err := cb.Execute(failing); !errors.Is(err, boom) {
+          t.Fatalf("2nd call err = %v, want boom", err)
+      }
+      if cb.State() != StateOpen {
+          t.Fatalf("state = %v, want Open after %d failures", cb.State(), 2)
+      }
+      // Пока open — вызов не должен доходить до fn.
+      if err := cb.Execute(failing); !errors.Is(err, ErrCircuitOpen) {
+          t.Fatalf("3rd call err = %v, want ErrCircuitOpen", err)
+      }
+      if calls != 2 {
+          t.Fatalf("fn calls = %d, want 2 (open must fast-fail)", calls)
+      }
+  }
+
+  func TestBreakerHalfOpenRecovers(t *testing.T) {
+      cb := NewCircuitBreaker(1, 40*time.Millisecond)
+      if err := cb.Execute(func() error { return errors.New("x") }); err == nil {
+          t.Fatalf("failing call must return error")
+      }
+      if cb.State() != StateOpen {
+          t.Fatalf("state = %v, want Open", cb.State())
+      }
+      time.Sleep(60 * time.Millisecond)
+      // Half-open: пробный успешный вызов закрывает цепь.
+      if err := cb.Execute(func() error { return nil }); err != nil {
+          t.Fatalf("trial call err = %v, want nil", err)
+      }
+      if cb.State() != StateClosed {
+          t.Fatalf("state = %v, want Closed after successful trial", cb.State())
+      }
+  }
+
+  func TestBreakerHalfOpenReopensOnFailure(t *testing.T) {
+      cb := NewCircuitBreaker(1, 40*time.Millisecond)
+      _ = cb.Execute(func() error { return errors.New("x") })
+      time.Sleep(60 * time.Millisecond)
+      if err := cb.Execute(func() error { return errors.New("still bad") }); err == nil {
+          t.Fatalf("trial failure must return the error")
+      }
+      if cb.State() != StateOpen {
+          t.Fatalf("state = %v, want Open after failed trial", cb.State())
+      }
+  }
+
+  func TestBreakerConcurrent(t *testing.T) {
+      cb := NewCircuitBreaker(5, time.Hour) // не восстанавливаемся в тесте
+      var opened int64
+      var wg sync.WaitGroup
+      for g := 0; g < 200; g++ {
+          wg.Add(1)
+          go func() {
+              defer wg.Done()
+              err := cb.Execute(func() error { return errors.New("fail") })
+              if errors.Is(err, ErrCircuitOpen) {
+                  atomic.AddInt64(&opened, 1)
+              }
+          }()
+      }
+      wg.Wait()
+      if cb.State() != StateOpen {
+          t.Fatalf("state = %v, want Open", cb.State())
+      }
+      if atomic.LoadInt64(&opened) == 0 {
+          t.Fatalf("expected some calls to be fast-failed while open")
+      }
+  }

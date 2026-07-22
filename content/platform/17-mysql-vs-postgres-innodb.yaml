@@ -1,0 +1,136 @@
+slug: mysql-vs-postgres-innodb
+section: platform
+title: "MySQL vs PostgreSQL: clustered index InnoDB, MVCC, репликация"
+difficulty: senior
+tags: [mysql, postgres, mvcc]
+question_md: |
+  В чём принципиальные различия между MySQL (InnoDB) и PostgreSQL на уровне
+  хранения: что такое clustered index в InnoDB и какие у него следствия, чем
+  отличается реализация MVCC (undo log vs версии-строки в heap), как устроена
+  репликация в обеих СУБД и по каким критериям выбирать одну или другую под
+  конкретную нагрузку?
+answer_levels:
+  - level: middle
+    text_md: |
+      **Архитектура.** MySQL — движки хранения подключаемые (pluggable storage
+      engines), стандарт де-факто — InnoDB. PostgreSQL — единый монолитный
+      движок. Обе БД дают ACID, MVCC и блокировки на уровне строк, но по-разному
+      хранят данные.
+
+      **Clustered index (InnoDB).** В InnoDB строки таблицы физически лежат
+      внутри B-tree первичного ключа — это и есть кластерный индекс: данные и PK
+      это одна структура, отсортированная по PK. У PostgreSQL таблицы — это
+      **heap** (неупорядоченная куча строк), а любой индекс (включая PK) хранит
+      указатель на строку (TID = номер страницы + смещение).
+
+      Главное следствие clustered index: вторичный (secondary) индекс в InnoDB
+      хранит не указатель на строку, а **значение PK**. Поэтому поиск по
+      вторичному индексу — это «double lookup»: сначала по secondary находим PK,
+      потом по clustered находим строку. В PostgreSQL все индексы равноправны и
+      сразу ведут в heap.
+
+      **Выбор PK в InnoDB критичен.** Случайный UUID как PK → вставки в случайные
+      места B-tree → page splits и фрагментация. Правильно — автоинкрементный
+      `BIGINT` (вставка всегда в конец), а UUID хранить отдельной уникальной
+      колонкой; либо UUID v7 (time-sortable). В PostgreSQL heap к этому
+      нечувствителен.
+
+      **Когда что.** PostgreSQL — богатые типы (`JSONB`, массивы, ranges),
+      сложные запросы, расширения (PostGIS, pg_trgm), строгая стандартность SQL.
+      MySQL — простые read-heavy нагрузки, огромная экосистема, где важна
+      предсказуемая производительность точечных запросов по PK.
+  - level: senior
+    text_md: |
+      **Следствия clustered index глубже.** Поскольку каждый secondary index в
+      InnoDB тащит в себе значение PK, **широкий PK раздувает все вторичные
+      индексы** — ещё один аргумент за узкий `BIGINT`. Covering index (когда все
+      нужные колонки есть в самом индексе) убирает double lookup — InnoDB делает
+      index-only scan. В PostgreSQL index-only scan возможен через `INCLUDE`, но
+      требует актуальной visibility map (иначе всё равно поход в heap проверить
+      видимость версии по MVCC — отсюда важность `VACUUM`).
+
+      **MVCC: главное различие.** InnoDB хранит **одну** актуальную версию строки
+      в кластерном индексе и обновляет её на месте (in-place), а старые версии
+      кладёт в **undo log**. Читатель по своему read view реконструирует нужную
+      старую версию из undo. Purge-поток чистит undo, когда старые версии больше
+      никому не нужны. PostgreSQL наоборот: `UPDATE` создаёт **новую версию
+      строки (tuple)** прямо в heap, старая остаётся «мёртвой» до `VACUUM`.
+
+      Практические следствия этой разницы:
+
+      - **Long-running transaction** держит «горизонт» видимости. В PostgreSQL
+        это блокирует `VACUUM` — мёртвые tuple копятся, таблица и индексы
+        пухнут (bloat). В InnoDB растёт history list (undo), что тоже больно,
+        но иначе.
+      - PostgreSQL требует борьбы с **bloat** и с **XID wraparound**
+        (autovacuum обязателен). InnoDB — с ростом undo/ibdata.
+      - `UPDATE` в PostgreSQL по умолчанию переписывает записи во **всех**
+        индексах таблицы (кроме случая HOT-update, когда индексируемые колонки
+        не менялись и новая версия влезла на ту же страницу). InnoDB обновляет
+        secondary index только если изменилась индексируемая колонка.
+
+      **Уровни изоляции по умолчанию различаются:** MySQL/InnoDB — `REPEATABLE
+      READ`, PostgreSQL — `READ COMMITTED`. Под `REPEATABLE READ` InnoDB
+      использует **next-key locks** (gap + record) для защиты от phantom при
+      блокирующих чтениях; PostgreSQL защищается снапшотом, а честную
+      сериализуемость даёт через SSI (`SERIALIZABLE`).
+
+      **Репликация.**
+      - MySQL: primary пишет **binary log** (binlog). Форматы — Statement-Based
+        (реплицируется SQL, ломается на недетерминированных `NOW()`/`RAND()`),
+        Row-Based (реплицируются изменённые строки, надёжно, по умолчанию),
+        Mixed. Async по умолчанию; semisync — primary ждёт ack хотя бы одной
+        реплики. **GTID** упрощает failover.
+      - PostgreSQL: физическая **streaming**-репликация (поток WAL, реплика —
+        побайтовая копия, read-only hot standby) + **logical** (декодирование
+        WAL в изменения строк, publish/subscribe, между версиями, для CDC).
+  - level: deep
+    text_md: |
+      **Undo vs heap-версионирование — цена дизайна.** InnoDB держит таблицу
+      компактной (одна актуальная версия + undo), поэтому point-read по PK
+      быстрый и стабильный по размеру. Но откат длинной транзакции дорог
+      (проиграть весь undo), а MVCC-чтение старых версий требует прохода по
+      цепочке undo. PostgreSQL пишет новую версию — `UPDATE` дешевле по логике,
+      но порождает мёртвые tuple и write amplification в индексах; без autovacuum
+      и разумного `fillfactor` (место на странице под HOT) таблица деградирует.
+      Именно поэтому в PostgreSQL так важен паттерн «не держать транзакцию
+      открытой», а в аналитике на PG следят за `n_dead_tup` и autovacuum-тюнингом.
+
+      **Блокировки и фантомы.** Классическая ловушка миграции с MySQL на
+      PostgreSQL: под InnoDB `REPEATABLE READ` next-key lock не даёт вставить
+      строку в «зазор» диапазона, который читает другая транзакция, — это меняет
+      конкурентное поведение и иногда маскирует гонки, которые в PostgreSQL
+      (снапшотный RR без предикатных блокировок) всплывут. Обратно: сериализация
+      через `SELECT ... FOR UPDATE` работает в обеих, но семантика gap-локов
+      InnoDB и `FOR UPDATE` PostgreSQL различается в деталях по диапазонам.
+
+      **Go-специфика.**
+      - MySQL: драйвер `go-sql-driver/mysql`. Обязательные параметры DSN:
+        `parseTime=true` (иначе `DATE/DATETIME` приедут как `[]byte`, а не
+        `time.Time`), `loc=UTC` (таймзона парсинга), корректная `collation`
+        (`utf8mb4_...`, иначе эмодзи/юникод режутся). `interpolateParams=true`
+        экономит round-trip, но меняет экранирование — осторожно. Плейсхолдеры
+        `?`.
+      - PostgreSQL: `pgx` (нативный протокол, prepared statements, `pgxpool`,
+        `COPY` для bulk) предпочтительнее `lib/pq`. Плейсхолдеры `$1, $2`.
+        `database/sql` поверх обоих даёт общий пул (`SetMaxOpenConns` и т.д.),
+        но у pgx есть более быстрый прямой API мимо `database/sql`.
+      - Общая ловушка: `LAST_INSERT_ID()` (MySQL, через `Result.LastInsertId()`)
+        vs `INSERT ... RETURNING id` (PostgreSQL) — `LastInsertId()` в pgx/PG не
+        работает, нужен `RETURNING` + `QueryRow`.
+
+      **Как выбирать под нагрузку.**
+      - Много точечных чтений/записей по PK, простая модель, привычная команде,
+        нужен MySQL-стек (ProxySQL, Vitess для шардинга) → **MySQL/InnoDB**.
+      - Сложные запросы, аналитика внутри OLTP, `JSONB`/массивы/gist/GIN, строгие
+        constraints, расширения, честная `SERIALIZABLE` через SSI, CDC на
+        logical replication → **PostgreSQL**.
+      - На больших write-нагрузках учитывать: InnoDB — рост undo и важность
+        узкого автоинкрементного PK; PostgreSQL — bloat/autovacuum/XID
+        wraparound. Ни одна из них не является OLAP-БД — под тяжёлую аналитику по
+        миллиардам строк берут колоночную СУБД (ClickHouse) рядом.
+follow_ups:
+  - "Почему широкий или случайный (UUID) PRIMARY KEY особенно вреден именно в InnoDB, но почти безразличен heap-таблицам PostgreSQL?"
+  - "Как long-running transaction по-разному вредит PostgreSQL (bloat) и InnoDB (undo/history list)?"
+  - "Чем next-key locks InnoDB под REPEATABLE READ отличаются от снапшотной изоляции PostgreSQL и как это меняет поведение конкурентных вставок?"
+  - "Почему в pgx не работает Result.LastInsertId() и как правильно получить сгенерированный id?"

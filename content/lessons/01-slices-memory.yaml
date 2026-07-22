@@ -1,0 +1,163 @@
+slug: slices-memory
+topic: go-internals
+title: "Слайс в памяти: ptr/len/cap, рост и общая подложка"
+minutes: 8
+tags: [memory, slices]
+body_md: |
+  ## Зачем это знать
+
+  Слайс — самая частая структура данных в Go и любимая тема собеседований: за удобным синтаксисом `s[a:b]` прячется работа с памятью, которую кандидат либо понимает, либо нет. Вопросы «что напечатает этот `append`?», «почему изменение одного слайса поменяло другой?» и «сколько раз здесь произойдёт аллокация?» отделяют тех, кто воспринимает слайс как «динамический массив», от тех, кто видит за ним дескриптор над общей подложкой. Разберёмся, как слайс лежит в памяти, что именно делает `append` и откуда берётся классический баг с шарингом.
+
+  ## Дескриптор над backing array
+
+  Слайс — это не массив. Это маленький дескриптор из трёх машинных слов: указатель на начало данных, длина и ёмкость.
+
+  ```go
+  type slice struct {
+      array unsafe.Pointer // ptr — начало окна в массиве
+      len   int            // сколько элементов доступно
+      cap   int            // сколько влезет без реаллокации
+  }
+  ```
+
+  Сами элементы живут в отдельном непрерывном участке памяти — backing array (подложке). Слайс лишь «окно» в него: `ptr` указывает на первый элемент окна, `len` задаёт границу чтения и записи, `cap` — сколько ещё элементов есть от `ptr` до конца подложки.
+
+  <svg viewBox="0 0 720 260" role="img" aria-label="Слайс-дескриптор из ptr, len и cap как окно над backing array из пяти элементов, первые три доступны">
+    <defs>
+      <marker id="sl-arw1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+    </defs>
+    <text x="30" y="22" font-family="system-ui, sans-serif" font-size="13" fill="#757575">slice header</text>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="30" y="32" width="100" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="130" y="32" width="100" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="230" y="32" width="100" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="80" y="60" text-anchor="middle">ptr</text>
+      <text x="180" y="60" text-anchor="middle">len = 3</text>
+      <text x="280" y="60" text-anchor="middle">cap = 5</text>
+    </g>
+    <text x="30" y="126" font-family="system-ui, sans-serif" font-size="13" fill="#757575">backing array</text>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="30" y="136" width="80" height="50" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="110" y="136" width="80" height="50" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="190" y="136" width="80" height="50" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="270" y="136" width="80" height="50" rx="6" fill="none" stroke="#E6E6E6"/>
+      <rect x="350" y="136" width="80" height="50" rx="6" fill="none" stroke="#E6E6E6"/>
+      <text x="70" y="167" text-anchor="middle">10</text>
+      <text x="150" y="167" text-anchor="middle">20</text>
+      <text x="230" y="167" text-anchor="middle">30</text>
+    </g>
+    <path d="M80 78 L80 110 L70 110 L70 134" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#sl-arw1)"/>
+    <path d="M30 196 L30 200 L270 200 L270 196" fill="none" stroke="#757575"/>
+    <text x="150" y="216" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#757575">len = 3 — доступно для чтения и записи</text>
+    <path d="M30 234 L30 230 L430 230 L430 234" fill="none" stroke="#757575"/>
+    <text x="230" y="250" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#757575">cap = 5 — выделено под backing array</text>
+  </svg>
+
+  Выражение `s[2:4]` не копирует данные — оно создаёт новый дескриптор с тем же `array` (сдвинутым указателем), новыми `len` и `cap`. Это и есть источник силы и опасности слайсов: срезы дёшевы, но делят память.
+
+  Отдельно про nil-слайс: у него `ptr == nil` и `len == cap == 0`, но `append` к нему работает как обычно — первый же элемент выделит подложку. Поэтому `var s []T` (nil) и `s := []T{}` (пустой, но ненулевой `ptr`) взаимозаменяемы для чтения, `range` и `append`; разница видна лишь при сравнении с `nil` и при JSON-маршалинге (nil даёт `null`, пустой — `[]`).
+
+  ## Что происходит при append
+
+  `append` смотрит на `cap`. Если `len < cap`, для новых элементов есть место прямо в текущей подложке: рантайм пишет их после `len`, увеличивает `len` и возвращает дескриптор на ту же память. Если же `len == cap`, места нет — рантайм выделяет новый, больший массив, копирует туда старые элементы, дописывает новые и возвращает дескриптор с новым `ptr`. Старая подложка живёт, пока на неё кто-то ссылается.
+
+  <svg viewBox="0 0 720 218" role="img" aria-label="append при заполненном слайсе выделяет новый больший backing array, копирует старые элементы и дописывает новый">
+    <defs>
+      <marker id="sl-arw2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+    </defs>
+    <text x="30" y="20" font-family="system-ui, sans-serif" font-size="13" fill="#757575">до append: len = cap = 4 (мест нет)</text>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="30" y="30" width="80" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="110" y="30" width="80" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="190" y="30" width="80" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="270" y="30" width="80" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="70" y="59" text-anchor="middle">a</text>
+      <text x="150" y="59" text-anchor="middle">b</text>
+      <text x="230" y="59" text-anchor="middle">c</text>
+      <text x="310" y="59" text-anchor="middle">d</text>
+    </g>
+    <path d="M190 78 L190 130" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#sl-arw2)"/>
+    <text x="210" y="106" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">новый массив + copy(a…d) + запись e</text>
+    <text x="30" y="150" font-family="system-ui, sans-serif" font-size="13" fill="#757575">после append: новый backing array, cap ≈ 8</text>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="30" y="160" width="78" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="108" y="160" width="78" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="186" y="160" width="78" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="264" y="160" width="78" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="342" y="160" width="78" height="46" rx="6" fill="#0D7680" stroke="#0D7680"/>
+      <rect x="420" y="160" width="78" height="46" rx="6" fill="none" stroke="#E6E6E6"/>
+      <rect x="498" y="160" width="78" height="46" rx="6" fill="none" stroke="#E6E6E6"/>
+      <rect x="576" y="160" width="78" height="46" rx="6" fill="none" stroke="#E6E6E6"/>
+      <text x="69" y="189" text-anchor="middle">a</text>
+      <text x="147" y="189" text-anchor="middle">b</text>
+      <text x="225" y="189" text-anchor="middle">c</text>
+      <text x="303" y="189" text-anchor="middle">d</text>
+      <text x="381" y="189" text-anchor="middle" fill="#FFFFFF">e</text>
+    </g>
+  </svg>
+
+  Отсюда железное правило: результат `append` всегда присваивают обратно (`s = append(s, x)`), потому что `ptr` мог измениться. Рост ёмкости не линейный: до Go 1.18 подложка примерно удваивалась до 1024 элементов и росла на ~25% дальше; с 1.18 формула в `growslice` сглажена (порог около 256, плавный переход между 2x и 1.25x), а финальный размер ещё округляется вверх до класса аллокатора через `roundupsize`. Поэтому реальный `cap` часто больше, чем вы просили, — и это нормально.
+
+  ## Ловушка общей подложки
+
+  Самый частый прод-баг со слайсами: под-слайс с запасом ёмкости молча пишет в чужую память.
+
+  ```go
+  s1 := []int{1, 2, 3, 4}
+  s2 := s1[:2]           // len=2, cap=4 — та же подложка!
+  s2 = append(s2, 99)    // len(2) < cap(4): пишет в s1[2]
+  // s1 теперь [1 2 99 4] — испортили соседа
+  ```
+
+  <svg viewBox="0 0 720 152" role="img" aria-label="Под-слайс s2 с запасом ёмкости при append пишет в общую подложку и портит элемент слайса s1">
+    <defs>
+      <marker id="sl-arw3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+      <marker id="sl-arw3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#B4552D"/>
+      </marker>
+    </defs>
+    <text x="470" y="16" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#B4552D">append(s2, 99): было 3 → стало 99</text>
+    <path d="M520 22 L520 52" fill="none" stroke="#B4552D" stroke-width="2" marker-end="url(#sl-arw3b)"/>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#242424">
+      <rect x="30" y="40" width="180" height="40" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="120" y="65" text-anchor="middle">s1 · len=4 · cap=4</text>
+      <rect x="30" y="95" width="180" height="40" rx="6" fill="none" stroke="#B4552D"/>
+      <text x="120" y="120" text-anchor="middle">s2 · len=3 · cap=4</text>
+    </g>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="320" y="56" width="80" height="52" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="400" y="56" width="80" height="52" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="480" y="56" width="80" height="52" rx="6" fill="#B4552D" stroke="#B4552D"/>
+      <rect x="560" y="56" width="80" height="52" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="360" y="88" text-anchor="middle">1</text>
+      <text x="440" y="88" text-anchor="middle">2</text>
+      <text x="520" y="88" text-anchor="middle" fill="#FFFFFF">99</text>
+      <text x="600" y="88" text-anchor="middle">4</text>
+    </g>
+    <path d="M210 60 L314 74" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#sl-arw3)"/>
+    <path d="M210 116 L314 90" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#sl-arw3)"/>
+  </svg>
+
+  Пока `append` укладывается в `cap`, он пишет прямо в общий массив и меняет то, что видит `s1`. Как только `cap` превышен — происходит реаллокация, `s2` уезжает на новую подложку, и связь рвётся. Из-за этого баг «мерцает»: на маленьких данных он есть, на больших (где случилась реаллокация) исчезает. Защита — трёхиндексный срез `s1[:2:2]`, который ставит `cap == len`, поэтому первый же `append` форсирует копию и не трогает `s1`.
+
+  ## Типичные заблуждения
+
+  - «Слайс копирует данные при `s[a:b]`» — нет, копируется только дескриптор (три слова), данные общие.
+  - «`append` всегда возвращает новый массив» — только при нехватке `cap`; иначе он мутирует существующую подложку.
+  - «`len` и `cap` — это одно и то же» — `len` это окно, `cap` это запас до конца подложки; разница и порождает баги шаринга.
+  - «Передача слайса в функцию копирует элементы» — копируется дескриптор; функция видит те же данные, но её `append` не виден снаружи, если реаллоцировал.
+
+  ## Что отвечать на собеседовании
+
+  - Слайс — дескриптор `{ptr, len, cap}` над backing array; срез создаёт новое окно в ту же память, а не копию.
+  - `append` пишет в подложку, пока `len < cap`; при `len == cap` выделяет новый массив и копирует — поэтому результат присваивают обратно.
+  - Рост ёмкости амортизированный (≈2x до порога, затем ≈1.25x, плюс округление аллокатором), а не «+1 каждый раз».
+  - Общая подложка — источник багов; изолировать под-слайс помогает полный трёхиндексный срез `a[low:high:max]` или явный `copy`.
+related_questions: [slice-internals-growth, escape-analysis-allocations, strings-runes-bytes-utf8]
+related_tasks: [merge-intervals]

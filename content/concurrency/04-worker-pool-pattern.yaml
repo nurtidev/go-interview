@@ -1,0 +1,136 @@
+slug: worker-pool-pattern
+section: concurrency
+title: "Worker pool на Go: эталонная реализация"
+tags: [worker-pool, patterns]
+difficulty: senior
+question_md: |
+  Реализуйте worker pool на Go: фиксированное число воркеров разбирает задачи из
+  канала и складывает результаты. Покажите корректное закрытие, сбор результатов
+  без дедлока, отмену по `context`, обработку паники внутри воркера. Когда брать
+  фиксированный пул, а когда семафор или `errgroup.SetLimit`?
+answer_levels:
+  - level: middle
+    text_md: |
+      Базовый worker pool — это канал задач `jobs`, канал результатов `results`
+      и `N` горутин-воркеров, читающих `jobs` в `range` и пишущих в `results`.
+      Отправитель после отправки всех задач закрывает `jobs` — это сигнал
+      воркерам завершиться по выходу из `range`. Чтобы собрать результаты без
+      дедлока, `results` закрывают отдельной горутиной после `wg.Wait()`, а
+      основной код читает `results` в `range`. Число воркеров ограничивает
+      параллелизм. Отмену пробрасывают через `context`.
+  - level: senior
+    text_md: |
+      Полный шаблон: фиксированный пул, `context` для отмены, `recover` в
+      воркере, чтобы паника одной задачи не роняла процесс, и корректная
+      последовательность закрытия каналов (`jobs` закрывает продюсер, `results` —
+      отдельная горутина после `Wait`). Читатель `results` всегда должен
+      дренировать канал, иначе воркеры залипнут на отправке.
+
+      ```go
+      package main
+
+      import (
+          "context"
+          "fmt"
+          "sync"
+      )
+
+      type Result struct {
+          Job int
+          Val int
+          Err error
+      }
+
+      func worker(ctx context.Context, jobs <-chan int, results chan<- Result) {
+          for {
+              select {
+              case <-ctx.Done():
+                  return
+              case j, ok := <-jobs:
+                  if !ok {
+                      return
+                  }
+                  results <- safeDo(j)
+              }
+          }
+      }
+
+      func safeDo(j int) (r Result) {
+          r.Job = j
+          defer func() {
+              if p := recover(); p != nil {
+                  r.Err = fmt.Errorf("panic on job %d: %v", j, p)
+              }
+          }()
+          r.Val = j * j
+          return r
+      }
+
+      func Run(ctx context.Context, tasks []int, n int) []Result {
+          jobs := make(chan int)
+          results := make(chan Result)
+          var wg sync.WaitGroup
+          for i := 0; i < n; i++ {
+              wg.Add(1)
+              go func() { defer wg.Done(); worker(ctx, jobs, results) }()
+          }
+          go func() { // продюсер владеет jobs
+              defer close(jobs)
+              for _, t := range tasks {
+                  select {
+                  case <-ctx.Done():
+                      return
+                  case jobs <- t:
+                  }
+              }
+          }()
+          go func() { wg.Wait(); close(results) }() // results после всех воркеров
+          var out []Result
+          for r := range results {
+              out = append(out, r)
+          }
+          return out
+      }
+
+      func main() {
+          res := Run(context.Background(), []int{1, 2, 3, 4, 5}, 3)
+          fmt.Println(len(res), "results computed")
+      }
+      ```
+
+      Через `errgroup` короче, если результат — только «ошибка/успех»:
+      `g.SetLimit(n)` (Go 1.20+) ограничивает число одновременных горутин, а
+      `g.Wait()` вернёт первую ошибку и через `WithContext` отменит остальные.
+      Выбор: фиксированный пул — когда воркеры дорого создавать/держат ресурс
+      (соединение, буфер) и нужен строгий потолок параллелизма; семафор
+      (`golang.org/x/sync/semaphore` или буферизованный канал-токен) — когда
+      горутина на задачу дёшева, но нужно ограничить пик; `errgroup.SetLimit` —
+      когда важен fail-fast по первой ошибке с отменой контекста.
+  - level: deep
+    text_md: |
+      Тонкости продакшена. Утечка воркеров: если читатель `results` вышел раньше
+      (например, по ошибке), воркеры навсегда заблокируются на `results <- r`.
+      Лечится тем же `ctx` в отправке результата (`select { case results <- r:
+      case <-ctx.Done(): return }`) или буфером `results` под известный объём.
+      Backpressure: небуферизованные `jobs`/`results` естественно тормозят
+      продюсера — это фича, а не баг; буфер добавляют осознанно под всплески.
+
+      Число воркеров: для CPU-bound берут `runtime.GOMAXPROCS(0)`, для IO-bound —
+      сильно больше (латентность I/O скрывает переключения), подбирают
+      бенчмарком. Слишком большой пул увеличивает контеншн на общих локах и
+      затраты планировщика. Паника: `recover` ловит только в той же горутине, где
+      случилась, — глобального перехвата нет; поэтому `recover` кладут в каждый
+      воркер. Неперехваченная паника в любой горутине завершает весь процесс —
+      это дизайн Go, а не баг.
+
+      Наблюдаемость: в проде к пулу добавляют метрики глубины очереди, времени в
+      очереди и числа активных воркеров; растущая очередь — сигнал, что пул
+      недоразмерен или downstream тормозит. Альтернативы «сырому» пулу:
+      `errgroup` с `SetLimit` (внутри — буферизованный канал-семафор ёмкости n),
+      `semaphore.Weighted` для взвешенных задач (одна задача занимает k «весов»),
+      или готовые библиотеки. Общий принцип: пул задаёт ровно один потолок
+      параллелизма, а `context` — единый механизм отмены сверху вниз.
+follow_ups:
+  - "Как гарантировать, что воркеры не залипнут на отправке в results при раннем выходе читателя?"
+  - "Чем semaphore.Weighted отличается от errgroup.SetLimit и когда он нужен?"
+  - "Как выбрать число воркеров для CPU-bound и IO-bound нагрузок и почему?"

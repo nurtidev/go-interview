@@ -1,0 +1,124 @@
+slug: pipeline-fanin-fanout
+section: concurrency
+title: "Pipeline, fan-in и fan-out"
+tags: [pipeline, patterns]
+difficulty: senior
+question_md: |
+  Опишите паттерн pipeline из стадий, соединённых каналами. Что такое fan-out и
+  fan-in? Как реализовать merge нескольких каналов в один, как пробрасывать
+  отмену и как не допустить утечки горутин при раннем завершении?
+answer_levels:
+  - level: middle
+    text_md: |
+      Pipeline — это цепочка стадий, каждая из которых читает из входного канала,
+      обрабатывает элемент и пишет в выходной. Первая стадия — generator, он
+      создаёт входные данные. Fan-out — когда несколько воркеров читают один и
+      тот же входной канал, распараллеливая стадию. Fan-in — обратная операция:
+      объединение нескольких каналов в один выходной. Каждая стадия закрывает
+      свой выходной канал, когда закончила (обычно через `defer close(out)`).
+      Отмену пробрасывают общим done-каналом или `context`, чтобы стадии не
+      зависли, если потребитель ушёл раньше.
+  - level: senior
+    text_md: |
+      Ключевые части — generator, fan-out (N воркеров на один вход) и fan-in
+      (`merge` через `WaitGroup` + общий `out`, который закрывают после `Wait`).
+      Отмена — через `context`; каждая стадия в `select` слушает `ctx.Done()` и
+      при отмене выходит, не блокируясь на отправке.
+
+      ```go
+      package main
+
+      import (
+          "context"
+          "sync"
+      )
+
+      func gen(ctx context.Context, nums ...int) <-chan int {
+          out := make(chan int)
+          go func() {
+              defer close(out)
+              for _, n := range nums {
+                  select {
+                  case out <- n:
+                  case <-ctx.Done():
+                      return
+                  }
+              }
+          }()
+          return out
+      }
+
+      func square(ctx context.Context, in <-chan int) <-chan int {
+          out := make(chan int)
+          go func() {
+              defer close(out)
+              for n := range in {
+                  select {
+                  case out <- n * n:
+                  case <-ctx.Done():
+                      return
+                  }
+              }
+          }()
+          return out
+      }
+
+      func merge(ctx context.Context, cs ...<-chan int) <-chan int {
+          out := make(chan int)
+          var wg sync.WaitGroup
+          wg.Add(len(cs))
+          for _, c := range cs {
+              go func(c <-chan int) {
+                  defer wg.Done()
+                  for v := range c {
+                      select {
+                      case out <- v:
+                      case <-ctx.Done():
+                          return
+                      }
+                  }
+              }(c)
+          }
+          go func() { wg.Wait(); close(out) }()
+          return out
+      }
+
+      func main() {
+          ctx, cancel := context.WithCancel(context.Background())
+          defer cancel()
+          in := gen(ctx, 1, 2, 3, 4, 5, 6, 7, 8)
+          // fan-out: три воркера на одном входе
+          w1, w2, w3 := square(ctx, in), square(ctx, in), square(ctx, in)
+          // fan-in: собрать обратно
+          for range merge(ctx, w1, w2, w3) {
+          }
+      }
+      ```
+  - level: deep
+    text_md: |
+      Утечки горутин — главная проблема pipeline. Если потребитель прекратил
+      читать `out` (нашёл ответ, случилась ошибка), а стадия блокируется на
+      `out <- v`, горутина зависает навсегда и утекает вместе с захваченными
+      ресурсами. Два дисциплинированных решения (из классической статьи Go blog
+      «Pipelines and cancellation»): либо каждая отправка обёрнута в `select` с
+      `ctx.Done()`/done-каналом (как выше), либо потребитель обязан дренировать
+      канал до конца. На практике `context` предпочтительнее done-канала: он
+      композируется, несёт дедлайн и распространяется по дереву вызовов.
+
+      Fan-out увеличивает пропускную способность только у CPU/IO-bound стадий и
+      не сохраняет порядок — если порядок важен, нумеруйте элементы и
+      пересортируйте на выходе, либо не делайте fan-out на этой стадии. Точка
+      «схлопывания» после fan-out — это `merge`, и он же становится точкой
+      сериализации: если downstream медленный, параллелизм вверх по течению
+      бесполезен (закон Амдала на уровне каналов).
+
+      Диагностика утечек: `runtime.NumGoroutine()` в тестах, `go test -race`,
+      `uber-go/goleak` в `TestMain` — он падает, если после теста остались живые
+      горутины. Небуферизованные каналы делают backpressure явным: скорость всей
+      цепочки равна скорости самой медленной стадии, что упрощает рассуждение о
+      памяти. Буфер добавляют точечно, чтобы сгладить всплески, но он же
+      откладывает обнаружение зависшего потребителя.
+follow_ups:
+  - "Как сохранить порядок элементов при fan-out на нескольких воркерах?"
+  - "Чем goleak помогает в тестах и как встроить его в TestMain?"
+  - "Где в pipeline после fan-out возникает точка сериализации и как это влияет на throughput?"

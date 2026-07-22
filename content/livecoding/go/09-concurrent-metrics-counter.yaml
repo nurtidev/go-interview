@@ -1,0 +1,248 @@
+slug: concurrent-metrics-counter
+kind: go
+title: "Конкурентный счётчик метрик"
+difficulty: senior
+tags: [atomic, concurrency, metrics]
+statement_md: |
+  Реализуйте потокобезопасный набор именованных счётчиков (запросы, ошибки,
+  байты). Инкремент вызывается из тысяч горутин, поэтому горячий путь должен
+  обходиться без блокировки всей структуры.
+
+  ```go
+  func NewMetrics() *Metrics
+  func (m *Metrics) Inc(name string)
+  func (m *Metrics) Add(name string, delta int64)
+  func (m *Metrics) Get(name string) int64
+  func (m *Metrics) Snapshot() map[string]int64
+  ```
+
+  Требования:
+
+  - `Inc`/`Add` атомарно меняют счётчик; при первом обращении к имени счётчик
+    создаётся.
+  - `Get` возвращает текущее значение (`0`, если счётчика нет).
+  - `Snapshot` отдаёт согласованный снимок всех счётчиков в новый map.
+  - Ни одно обновление не теряется при конкурентном доступе (проверяется под
+    `-race`).
+starter_code: |
+  package main
+
+  // Metrics — потокобезопасный набор именованных счётчиков.
+  // Горячий путь (Inc/Add) должен обходиться без блокировки всей структуры.
+  type Metrics struct {
+      // TODO: map имя -> счётчик + защита от гонок
+  }
+
+  // NewMetrics создаёт пустой набор счётчиков.
+  func NewMetrics() *Metrics {
+      // TODO
+      return &Metrics{}
+  }
+
+  // Inc увеличивает счётчик name на 1.
+  func (m *Metrics) Inc(name string) {
+      // TODO
+  }
+
+  // Add прибавляет delta к счётчику name.
+  func (m *Metrics) Add(name string, delta int64) {
+      // TODO
+  }
+
+  // Get возвращает текущее значение счётчика (0, если его нет).
+  func (m *Metrics) Get(name string) int64 {
+      // TODO
+      return 0
+  }
+
+  // Snapshot возвращает согласованный снимок всех счётчиков.
+  func (m *Metrics) Snapshot() map[string]int64 {
+      // TODO
+      return nil
+  }
+hints:
+  - "Сама map в Go не потокобезопасна, но значения можно сделать *atomic.Int64. Тогда инкремент существующего счётчика идёт вообще без блокировки map."
+  - "Разделите ответственность: sync.RWMutex защищает структуру map (добавление новых ключей), а atomic.Int64 — само значение. Указатель на счётчик после вставки не меняется."
+  - "В getOrCreate сначала прочитайте под RLock; если ключа нет — берите Lock и делайте double-check (пока ждали Lock, ключ мог создать другой), иначе перезапишете чужой счётчик и потеряете инкременты."
+solution_md: |
+  ### Идея
+
+  Горячий путь — инкремент уже существующего счётчика — не должен трогать
+  глобальную блокировку. Поэтому значения храним как `*atomic.Int64`: сам
+  `Add(1)` атомарен и mutex не требует.
+
+  `map` в Go не поддерживает конкурентную запись, поэтому её структуру
+  (добавление новых ключей) защищаем `sync.RWMutex`. Получение счётчика идёт по
+  схеме read-mostly: сперва `RLock` и попытка найти ключ; если не нашли — `Lock`
+  и **double-check**, потому что между `RUnlock` и `Lock` ключ мог создать кто-то
+  другой. Без повторной проверки мы бы перезаписали чужой счётчик и потеряли уже
+  сделанные инкременты.
+
+  `Snapshot` под `RLock` копирует значения `Load()` в новый map.
+
+  ### Эталонное решение
+
+  ```go
+  import (
+      "sync"
+      "sync/atomic"
+  )
+
+  type Metrics struct {
+      mu     sync.RWMutex
+      values map[string]*atomic.Int64
+  }
+
+  func NewMetrics() *Metrics {
+      return &Metrics{values: make(map[string]*atomic.Int64)}
+  }
+
+  func (m *Metrics) counter(name string) *atomic.Int64 {
+      m.mu.RLock()
+      c, ok := m.values[name]
+      m.mu.RUnlock()
+      if ok {
+          return c
+      }
+      m.mu.Lock()
+      defer m.mu.Unlock()
+      if c, ok = m.values[name]; ok {
+          return c
+      }
+      c = new(atomic.Int64)
+      m.values[name] = c
+      return c
+  }
+
+  func (m *Metrics) Inc(name string) {
+      m.counter(name).Add(1)
+  }
+
+  func (m *Metrics) Add(name string, delta int64) {
+      m.counter(name).Add(delta)
+  }
+
+  func (m *Metrics) Get(name string) int64 {
+      m.mu.RLock()
+      c, ok := m.values[name]
+      m.mu.RUnlock()
+      if !ok {
+          return 0
+      }
+      return c.Load()
+  }
+
+  func (m *Metrics) Snapshot() map[string]int64 {
+      m.mu.RLock()
+      defer m.mu.RUnlock()
+      out := make(map[string]int64, len(m.values))
+      for k, c := range m.values {
+          out[k] = c.Load()
+      }
+      return out
+  }
+  ```
+
+  Сложность: `Inc`/`Add` — `O(1)` без блокировки для существующего ключа; создание ключа и `Snapshot` — под мьютексом.
+
+  ### Типичные ошибки на интервью
+
+  - Писать в общую map[string]int64 из горутин без синхронизации — гонка, ловится -race.
+  - Пропустить double-check в getOrCreate — два счётчика на один ключ и потерянные инкременты.
+  - Держать один общий Mutex на инкременты — узкое место под нагрузкой (для того и atomic).
+  - В Snapshot вернуть саму внутреннюю map — гонка при последующих обновлениях.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "strconv"
+      "sync"
+      "testing"
+  )
+
+  func TestMetricsBasic(t *testing.T) {
+      m := NewMetrics()
+      if got := m.Get("none"); got != 0 {
+          t.Fatalf("Get on unknown = %d, want 0", got)
+      }
+      m.Inc("req")
+      m.Inc("req")
+      m.Add("bytes", 100)
+      if got := m.Get("req"); got != 2 {
+          t.Fatalf("Get(req) = %d, want 2", got)
+      }
+      if got := m.Get("bytes"); got != 100 {
+          t.Fatalf("Get(bytes) = %d, want 100", got)
+      }
+  }
+
+  func TestMetricsConcurrentSameKey(t *testing.T) {
+      m := NewMetrics()
+      const (
+          goroutines = 100
+          perG       = 1000
+      )
+      var wg sync.WaitGroup
+      for g := 0; g < goroutines; g++ {
+          wg.Add(1)
+          go func() {
+              defer wg.Done()
+              for i := 0; i < perG; i++ {
+                  m.Inc("hits")
+              }
+          }()
+      }
+      wg.Wait()
+      if got := m.Get("hits"); got != goroutines*perG {
+          t.Fatalf("Get(hits) = %d, want %d (lost updates?)", got, goroutines*perG)
+      }
+  }
+
+  func TestMetricsConcurrentDistinctKeysCreation(t *testing.T) {
+      m := NewMetrics()
+      const goroutines = 200
+      var wg sync.WaitGroup
+      // Все горутины впервые создают один и тот же ключ одновременно —
+      // потерянные из-за гонки создания счётчики исказят сумму.
+      for g := 0; g < goroutines; g++ {
+          wg.Add(1)
+          go func() {
+              defer wg.Done()
+              m.Add("fresh", 1)
+          }()
+      }
+      wg.Wait()
+      if got := m.Get("fresh"); got != goroutines {
+          t.Fatalf("Get(fresh) = %d, want %d", got, goroutines)
+      }
+  }
+
+  func TestMetricsSnapshot(t *testing.T) {
+      m := NewMetrics()
+      const goroutines = 50
+      var wg sync.WaitGroup
+      for g := 0; g < goroutines; g++ {
+          wg.Add(1)
+          go func(g int) {
+              defer wg.Done()
+              m.Add("k"+strconv.Itoa(g%5), int64(g))
+          }(g)
+      }
+      // Читаем снимок конкурентно с записями — гонок быть не должно.
+      _ = m.Snapshot()
+      wg.Wait()
+      snap := m.Snapshot()
+      var total int64
+      for _, v := range snap {
+          total += v
+      }
+      var want int64
+      for g := 0; g < goroutines; g++ {
+          want += int64(g)
+      }
+      if total != want {
+          t.Fatalf("snapshot total = %d, want %d", total, want)
+      }
+  }

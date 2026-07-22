@@ -1,0 +1,262 @@
+slug: ttl-cache-concurrent
+kind: go
+title: "TTL-кэш с конкурентным доступом"
+difficulty: senior
+tags: [cache, ttl, concurrency, generics]
+statement_md: |
+  Реализуйте потокобезопасный in-memory кэш, где каждая запись живёт заданное
+  время (TTL) и после истечения не возвращается. Такой кэш нужен, например, для
+  результатов резолвинга или ответов внешнего API.
+
+  ```go
+  func NewTTLCache[K comparable, V any](cleanupInterval time.Duration) *TTLCache[K, V]
+  func (c *TTLCache[K, V]) Set(key K, value V, ttl time.Duration)
+  func (c *TTLCache[K, V]) Get(key K) (V, bool)
+  func (c *TTLCache[K, V]) Delete(key K)
+  func (c *TTLCache[K, V]) Len() int
+  func (c *TTLCache[K, V]) Stop()
+  ```
+
+  Требования:
+
+  - `Get` возвращает `(value, true)`, только если ключ есть и не истёк; иначе
+    `(zero, false)`.
+  - `Set` перезаписывает значение и продлевает срок жизни.
+  - При `cleanupInterval > 0` запускается фоновая горутина, периодически удаляющая
+    истёкшие записи; `Stop` её останавливает (повторный вызов безопасен).
+  - Все методы вызываются конкурентно (проверяется под `-race`).
+starter_code: |
+  package main
+
+  import "time"
+
+  // TTLCache — потокобезопасный кэш, где каждая запись живёт заданный ttl.
+  type TTLCache[K comparable, V any] struct {
+      // TODO: поля (map записей, RWMutex, канал остановки фоновой очистки)
+  }
+
+  // NewTTLCache создаёт кэш; при cleanupInterval > 0 запускает фоновую очистку.
+  func NewTTLCache[K comparable, V any](cleanupInterval time.Duration) *TTLCache[K, V] {
+      // TODO
+      return &TTLCache[K, V]{}
+  }
+
+  // Set кладёт значение с временем жизни ttl.
+  func (c *TTLCache[K, V]) Set(key K, value V, ttl time.Duration) {
+      // TODO
+  }
+
+  // Get возвращает значение и true, если ключ есть и не истёк.
+  func (c *TTLCache[K, V]) Get(key K) (V, bool) {
+      // TODO
+      var zero V
+      return zero, false
+  }
+
+  // Delete удаляет ключ.
+  func (c *TTLCache[K, V]) Delete(key K) {
+      // TODO
+  }
+
+  // Len возвращает число хранимых записей.
+  func (c *TTLCache[K, V]) Len() int {
+      // TODO
+      return 0
+  }
+
+  // Stop останавливает фоновую очистку.
+  func (c *TTLCache[K, V]) Stop() {
+      // TODO
+  }
+hints:
+  - "Храните рядом со значением момент истечения expiresAt = time.Now().Add(ttl). В Get сравнивайте с time.Now() — ленивое истечение не требует таймера на каждый ключ."
+  - "Читателей больше, чем писателей: sync.RWMutex — Get/Len под RLock, Set/Delete/очистка под Lock. Фоновая очистка живёт в отдельной горутине с time.Ticker."
+  - "Остановку сделайте через канал stop и select в цикле очистки. Чтобы повторный Stop не паниковал на двойном close, оберните закрытие в sync.Once."
+solution_md: |
+  ### Идея
+
+  Каждая запись хранит значение и `expiresAt`. Истечение — ленивое: `Get`
+  сравнивает `expiresAt` с текущим временем и не отдаёт просроченное, даже если
+  фоновая очистка до него ещё не дошла. Это избавляет от таймера на каждый ключ.
+
+  Фоновая горутина по `time.Ticker` периодически проходит map и удаляет
+  просроченное, чтобы память не росла из-за «мёртвых» ключей, которые никто не
+  читает. Останов — через канал `stop` и `select`; `sync.Once` делает повторный
+  `Stop` безопасным.
+
+  Синхронизация — `sync.RWMutex`: чтения (`Get`, `Len`) параллелятся под `RLock`,
+  записи и очистка берут `Lock`. Для generic-значения «ничего» возвращаем через
+  `var zero V`.
+
+  ### Эталонное решение
+
+  ```go
+  import (
+      "sync"
+      "time"
+  )
+
+  type ttlItem[V any] struct {
+      value     V
+      expiresAt time.Time
+  }
+
+  type TTLCache[K comparable, V any] struct {
+      mu    sync.RWMutex
+      items map[K]ttlItem[V]
+      stop  chan struct{}
+      once  sync.Once
+  }
+
+  func NewTTLCache[K comparable, V any](cleanupInterval time.Duration) *TTLCache[K, V] {
+      c := &TTLCache[K, V]{
+          items: make(map[K]ttlItem[V]),
+          stop:  make(chan struct{}),
+      }
+      if cleanupInterval > 0 {
+          go c.cleanupLoop(cleanupInterval)
+      }
+      return c
+  }
+
+  func (c *TTLCache[K, V]) Set(key K, value V, ttl time.Duration) {
+      c.mu.Lock()
+      c.items[key] = ttlItem[V]{value: value, expiresAt: time.Now().Add(ttl)}
+      c.mu.Unlock()
+  }
+
+  func (c *TTLCache[K, V]) Get(key K) (V, bool) {
+      c.mu.RLock()
+      it, ok := c.items[key]
+      c.mu.RUnlock()
+      if !ok || time.Now().After(it.expiresAt) {
+          var zero V
+          return zero, false
+      }
+      return it.value, true
+  }
+
+  func (c *TTLCache[K, V]) Delete(key K) {
+      c.mu.Lock()
+      delete(c.items, key)
+      c.mu.Unlock()
+  }
+
+  func (c *TTLCache[K, V]) Len() int {
+      c.mu.RLock()
+      defer c.mu.RUnlock()
+      return len(c.items)
+  }
+
+  func (c *TTLCache[K, V]) cleanupLoop(interval time.Duration) {
+      t := time.NewTicker(interval)
+      defer t.Stop()
+      for {
+          select {
+          case <-t.C:
+              now := time.Now()
+              c.mu.Lock()
+              for k, it := range c.items {
+                  if now.After(it.expiresAt) {
+                      delete(c.items, k)
+                  }
+              }
+              c.mu.Unlock()
+          case <-c.stop:
+              return
+          }
+      }
+  }
+
+  func (c *TTLCache[K, V]) Stop() {
+      c.once.Do(func() { close(c.stop) })
+  }
+  ```
+
+  Сложность: `Get`/`Set`/`Delete` — `O(1)` в среднем; фоновая очистка — `O(n)` за проход.
+
+  ### Типичные ошибки на интервью
+
+  - Отдавать истёкшее значение, полагаясь только на фоновую очистку — между тиками Get обязан сам проверять expiresAt.
+  - Не удалять истёкшие записи вовсе — утечка памяти на редко читаемых ключах.
+  - close(stop) без sync.Once — паника при повторном Stop.
+  - Возвращать nil вместо var zero V — для generic-значения это некорректно.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "strconv"
+      "sync"
+      "testing"
+      "time"
+  )
+
+  func TestTTLGetSet(t *testing.T) {
+      c := NewTTLCache[string, int](0) // 0 => без фоновой очистки
+      c.Set("a", 42, time.Minute)
+      if v, ok := c.Get("a"); !ok || v != 42 {
+          t.Fatalf("Get(a) = (%d,%v), want (42,true)", v, ok)
+      }
+      if _, ok := c.Get("missing"); ok {
+          t.Fatalf("Get(missing) = ok, want not ok")
+      }
+  }
+
+  func TestTTLExpires(t *testing.T) {
+      c := NewTTLCache[string, string](0)
+      c.Set("k", "v", 30*time.Millisecond)
+      if _, ok := c.Get("k"); !ok {
+          t.Fatalf("value must be present before expiry")
+      }
+      time.Sleep(60 * time.Millisecond)
+      if _, ok := c.Get("k"); ok {
+          t.Fatalf("value must be gone after TTL")
+      }
+  }
+
+  func TestTTLBackgroundCleanup(t *testing.T) {
+      c := NewTTLCache[int, int](15 * time.Millisecond)
+      defer c.Stop()
+      for i := 0; i < 100; i++ {
+          c.Set(i, i, 20*time.Millisecond)
+      }
+      deadline := time.Now().Add(2 * time.Second)
+      for time.Now().Before(deadline) {
+          if c.Len() == 0 {
+              return
+          }
+          time.Sleep(10 * time.Millisecond)
+      }
+      t.Fatalf("expired items were not cleaned up, Len() = %d", c.Len())
+  }
+
+  func TestTTLConcurrent(t *testing.T) {
+      c := NewTTLCache[string, int](5 * time.Millisecond)
+      defer c.Stop()
+      const goroutines = 50
+      var wg sync.WaitGroup
+      for g := 0; g < goroutines; g++ {
+          wg.Add(1)
+          go func(g int) {
+              defer wg.Done()
+              key := "key-" + strconv.Itoa(g)
+              for i := 0; i < 500; i++ {
+                  c.Set(key, i, time.Minute)
+                  c.Get(key)
+                  if i%50 == 0 {
+                      c.Delete(key)
+                  }
+              }
+              c.Set(key, g, time.Minute)
+          }(g)
+      }
+      wg.Wait()
+      for g := 0; g < goroutines; g++ {
+          key := "key-" + strconv.Itoa(g)
+          if v, ok := c.Get(key); !ok || v != g {
+              t.Fatalf("Get(%s) = (%d,%v), want (%d,true)", key, v, ok, g)
+          }
+      }
+  }

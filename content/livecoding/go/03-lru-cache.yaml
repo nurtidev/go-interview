@@ -1,0 +1,191 @@
+slug: lru-cache
+kind: go
+title: "LRU Cache"
+difficulty: senior
+tags: [cache, hashmap, linked-list]
+statement_md: |
+  Реализуйте кэш с вытеснением по правилу Least Recently Used (LRU) фиксированной
+  ёмкости. Обе операции должны работать за `O(1)` в среднем.
+
+  Нужны:
+
+  ```go
+  func Constructor(capacity int) LRUCache
+  func (c *LRUCache) Get(key int) int      // значение по ключу или -1, если ключа нет
+  func (c *LRUCache) Put(key, value int)   // вставка/обновление; при переполнении вытесняет LRU
+  ```
+
+  Правила:
+
+  - `Get` по существующему ключу возвращает значение и делает ключ самым свежим.
+  - `Put` вставляет новую пару или обновляет значение существующего ключа
+    (обновление тоже делает ключ самым свежим).
+  - Если после вставки нового ключа размер превысит `capacity`, вытесняется
+    ключ, к которому дольше всего не обращались.
+
+  Пример: для `Constructor(2)` последовательность
+  `Put(1,1); Put(2,2); Get(1)->1; Put(3,3) // вытесняет 2; Get(2)->-1`.
+starter_code: |
+  package main
+
+  type LRUCache struct {
+      // TODO: добавьте нужные поля (например, map + container/list)
+      capacity int
+  }
+
+  // Constructor создаёт LRU-кэш заданной ёмкости.
+  func Constructor(capacity int) LRUCache {
+      return LRUCache{capacity: capacity}
+  }
+
+  // Get возвращает значение по ключу или -1, если ключа нет.
+  func (c *LRUCache) Get(key int) int {
+      // TODO
+      return -1
+  }
+
+  // Put кладёт пару ключ-значение, вытесняя least recently used при переполнении.
+  func (c *LRUCache) Put(key, value int) {
+      // TODO
+  }
+hints:
+  - "Нужны две операции за O(1): найти значение по ключу и переместить элемент в разряд самых свежих / вытеснить самый старый. Одна структура данных с этим не справляется — скомбинируйте две."
+  - "Двусвязный список хранит порядок использования: голова — самый свежий, хвост — кандидат на вытеснение. Хэш-таблица map[key]*Element даёт доступ к узлу за O(1). В Go для этого есть container/list."
+  - "Get: если ключ есть — MoveToFront и верните значение. Put: если ключ есть — обновите значение и MoveToFront; иначе, если Len() >= capacity, удалите list.Back() и его ключ из map, затем PushFront нового узла. Храните ключ внутри узла, чтобы уметь удалить его из map при вытеснении."
+solution_md: |
+  ### Идея
+
+  LRU-кэш строится на комбинации двух структур:
+
+  - **Двусвязный список** задаёт порядок обращения: голова — самый свежий
+    элемент, хвост — самый давний (кандидат на вытеснение).
+  - **Хэш-таблица** `map[key]*list.Element` даёт доступ к узлу списка за `O(1)`.
+
+  При обращении (`Get` или обновляющий `Put`) переносим узел в голову. При
+  переполнении удаляем узел из хвоста и его ключ из map. Чтобы уметь удалить
+  ключ из map при вытеснении, храним и ключ, и значение прямо в узле.
+
+  ### Эталонное решение
+
+  ```go
+  import "container/list"
+
+  type entry struct {
+      key   int
+      value int
+  }
+
+  type LRUCache struct {
+      capacity int
+      ll       *list.List
+      items    map[int]*list.Element
+  }
+
+  func Constructor(capacity int) LRUCache {
+      return LRUCache{
+          capacity: capacity,
+          ll:       list.New(),
+          items:    make(map[int]*list.Element),
+      }
+  }
+
+  func (c *LRUCache) Get(key int) int {
+      if el, ok := c.items[key]; ok {
+          c.ll.MoveToFront(el)
+          return el.Value.(*entry).value
+      }
+      return -1
+  }
+
+  func (c *LRUCache) Put(key, value int) {
+      if el, ok := c.items[key]; ok {
+          el.Value.(*entry).value = value
+          c.ll.MoveToFront(el)
+          return
+      }
+      if c.capacity > 0 && c.ll.Len() >= c.capacity {
+          oldest := c.ll.Back()
+          if oldest != nil {
+              c.ll.Remove(oldest)
+              delete(c.items, oldest.Value.(*entry).key)
+          }
+      }
+      el := c.ll.PushFront(&entry{key: key, value: value})
+      c.items[key] = el
+  }
+  ```
+
+  Сложность: `Get` и `Put` — `O(1)` в среднем, память — `O(capacity)`.
+
+  ### Типичные ошибки на интервью
+
+  - Обновлять свежесть только в `Get`, но не в обновляющем `Put`.
+  - Не хранить ключ в узле — тогда при вытеснении хвоста нечем удалить запись из map, и map растёт бесконечно (утечка).
+  - Вытеснять до вставки/обновления существующего ключа, ошибочно уменьшая размер.
+  - Использовать срез вместо списка — сдвиг элементов даёт `O(n)`, а не `O(1)`.
+time_limit_sec: 10
+race: false
+test_code: |
+  package main
+
+  import "testing"
+
+  func TestLRUBasic(t *testing.T) {
+      c := Constructor(2)
+      c.Put(1, 1)
+      c.Put(2, 2)
+      if got := c.Get(1); got != 1 {
+          t.Fatalf("Get(1) = %d, want 1", got)
+      }
+      c.Put(3, 3) // вытесняет ключ 2 (least recently used)
+      if got := c.Get(2); got != -1 {
+          t.Fatalf("Get(2) = %d, want -1 (evicted)", got)
+      }
+      c.Put(4, 4) // вытесняет ключ 1
+      if got := c.Get(1); got != -1 {
+          t.Fatalf("Get(1) = %d, want -1 (evicted)", got)
+      }
+      if got := c.Get(3); got != 3 {
+          t.Fatalf("Get(3) = %d, want 3", got)
+      }
+      if got := c.Get(4); got != 4 {
+          t.Fatalf("Get(4) = %d, want 4", got)
+      }
+  }
+
+  func TestLRUUpdateValue(t *testing.T) {
+      c := Constructor(2)
+      c.Put(1, 1)
+      c.Put(1, 10) // обновление, размер не должен вырасти
+      c.Put(2, 2)
+      if got := c.Get(1); got != 10 {
+          t.Fatalf("Get(1) = %d, want 10", got)
+      }
+      if got := c.Get(2); got != 2 {
+          t.Fatalf("Get(2) = %d, want 2", got)
+      }
+  }
+
+  func TestLRUMissing(t *testing.T) {
+      c := Constructor(1)
+      if got := c.Get(42); got != -1 {
+          t.Fatalf("Get(42) on empty = %d, want -1", got)
+      }
+  }
+
+  func TestLRUGetRefreshesRecency(t *testing.T) {
+      c := Constructor(2)
+      c.Put(1, 1)
+      c.Put(2, 2)
+      // Обращение к ключу 1 делает ключ 2 самым давним.
+      if got := c.Get(1); got != 1 {
+          t.Fatalf("Get(1) = %d, want 1", got)
+      }
+      c.Put(3, 3) // должен вытеснить ключ 2, а не 1
+      if got := c.Get(2); got != -1 {
+          t.Fatalf("Get(2) = %d, want -1 (should be evicted)", got)
+      }
+      if got := c.Get(1); got != 1 {
+          t.Fatalf("Get(1) = %d, want 1 (should survive)", got)
+      }
+  }

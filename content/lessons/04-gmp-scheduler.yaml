@@ -1,0 +1,127 @@
+slug: gmp-scheduler
+topic: go-internals
+title: "Планировщик Go: G, M, P"
+minutes: 9
+tags: [runtime, scheduler, goroutine]
+body_md: |
+  ## Зачем это знать
+
+  Go позволяет запустить миллион горутин одной строкой `go f()`, и это действительно работает — потому что за горутинами стоит собственный планировщик в user space. На senior/staff-собеседовании вопрос «как устроен планировщик» звучит почти всегда: по ответу видно, понимаете ли вы, почему горутина дешевле потока, что происходит при блокировке и почему `GOMAXPROCS` ограничивает параллелизм, но не количество горутин. Тема всплывает и косвенно — когда спрашивают про утечки горутин, про latency-хвосты под нагрузкой или «почему сервис не масштабируется на все ядра». Разобравшись один раз в модели G-M-P, вы перестаёте отвечать на эти вопросы наугад.
+
+  ## Три сущности: G, M, P
+
+  Планировщик оперирует тремя объектами:
+
+  - **G** (goroutine) — сама горутина: её стек, счётчик команд, состояние. Это дешёвая структура; стек стартует всего с ~2 КБ и растёт по мере надобности.
+  - **M** (machine) — поток ОС, который реально исполняет машинный код. Только M умеет «крутить» процессор.
+  - **P** (processor) — логический процессор, контекст исполнения. Именно P даёт M право выполнять Go-код и хранит **локальную очередь** готовых горутин.
+
+  Ключевое правило: чтобы M исполнял Go-код, ему нужен P. Число P фиксировано и равно `GOMAXPROCS` (по умолчанию — число ядер). Значит, одновременно исполняется не больше `GOMAXPROCS` горутин, но самих горутин может быть миллионы — планировщик мультиплексирует их на потоки.
+
+  <svg viewBox="0 0 720 300" role="img" aria-label="Модель G, M, P: две пары P и M с локальными очередями готовых горутин и общая глобальная очередь">
+  <defs>
+  <marker id="s41" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#0D7680"/>
+  </marker>
+  </defs>
+  <rect x="240" y="14" width="240" height="54" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="360" y="36" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#242424">Global runq</text>
+  <text x="360" y="55" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">общая очередь готовых G</text>
+  <rect x="34" y="118" width="300" height="166" rx="6" fill="none" stroke="#0D7680"/>
+  <text x="48" y="140" font-family="system-ui, sans-serif" font-size="14" fill="#0D7680">P0 · логический процессор</text>
+  <rect x="48" y="152" width="272" height="42" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="60" y="178" font-family="system-ui, sans-serif" font-size="13" fill="#242424">M0 · поток ОС → выполняет G</text>
+  <rect x="48" y="216" width="272" height="52" rx="6" fill="none" stroke="#E6E6E6"/>
+  <text x="60" y="234" font-family="system-ui, sans-serif" font-size="12" fill="#757575">локальная runq</text>
+  <circle cx="150" cy="250" r="10" fill="#0D7680"/>
+  <circle cx="184" cy="250" r="10" fill="#0D7680"/>
+  <circle cx="218" cy="250" r="10" fill="#0D7680"/>
+  <rect x="386" y="118" width="300" height="166" rx="6" fill="none" stroke="#0D7680"/>
+  <text x="400" y="140" font-family="system-ui, sans-serif" font-size="14" fill="#0D7680">P1 · логический процессор</text>
+  <rect x="400" y="152" width="272" height="42" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="412" y="178" font-family="system-ui, sans-serif" font-size="13" fill="#242424">M1 · поток ОС → выполняет G</text>
+  <rect x="400" y="216" width="272" height="52" rx="6" fill="none" stroke="#E6E6E6"/>
+  <text x="412" y="234" font-family="system-ui, sans-serif" font-size="12" fill="#757575">локальная runq</text>
+  <circle cx="502" cy="250" r="10" fill="#0D7680"/>
+  <circle cx="536" cy="250" r="10" fill="#0D7680"/>
+  <line x1="300" y1="70" x2="190" y2="114" stroke="#0D7680" marker-end="url(#s41)"/>
+  <line x1="420" y1="70" x2="540" y2="114" stroke="#0D7680" marker-end="url(#s41)"/>
+  </svg>
+
+  Новая горутина обычно попадает в локальную очередь текущего P — это дёшево и без блокировок. Локальная очередь фиксированного размера (256 слотов) плюс отдельный слот `runnext` для «самой свежей» горутины (LIFO-оптимизация: только что созданная горутина запустится почти сразу, это улучшает локальность кэша). Если локальная очередь переполнилась — половина её горутин уезжает в **глобальную очередь** (global runq), общий пул, доступ к которому уже требует лока.
+
+  Почему горутина настолько дешёвая? Её стек стартует всего с ~2 КБ и растёт по мере надобности: пролог каждой функции сравнивает указатель стека с границей, и при нехватке `morestack` вызывает `copystack` — выделяет вдвое больший стек, копирует туда кадры и правит указатели. Поэтому можно держать миллионы горутин, не резервируя мегабайты на каждую, как для потока ОС.
+
+  ## Work stealing: почему ядра не простаивают
+
+  Что делать P, у которого кончились свои горутины? Он не засыпает сразу. Сначала заглядывает в глобальную очередь и в netpoller (готовые сетевые события), а если и там пусто — **крадёт половину** горутин у случайного другого P. Это и есть work stealing: балансировка нагрузки без центрального диспетчера, каждый P сам добирает себе работу.
+
+  <svg viewBox="0 0 720 220" role="img" aria-label="Work stealing: простаивающий P крадёт половину горутин из локальной очереди загруженного P">
+  <defs>
+  <marker id="s42" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#0D7680"/>
+  </marker>
+  </defs>
+  <rect x="30" y="46" width="290" height="150" rx="6" fill="none" stroke="#0D7680"/>
+  <text x="44" y="70" font-family="system-ui, sans-serif" font-size="14" fill="#0D7680">P-донор · очередь полна</text>
+  <circle cx="70" cy="120" r="12" fill="#0D7680"/>
+  <circle cx="110" cy="120" r="12" fill="#0D7680"/>
+  <circle cx="150" cy="120" r="12" fill="#757575"/>
+  <circle cx="190" cy="120" r="12" fill="#757575"/>
+  <text x="44" y="168" font-family="system-ui, sans-serif" font-size="12" fill="#757575">серые — уедут к соседу</text>
+  <rect x="400" y="46" width="290" height="150" rx="6" fill="none" stroke="#757575"/>
+  <text x="414" y="70" font-family="system-ui, sans-serif" font-size="14" fill="#757575">P-вор · своих G нет</text>
+  <text x="414" y="120" font-family="system-ui, sans-serif" font-size="13" fill="#242424">1) global runq → 2) netpoller</text>
+  <text x="414" y="142" font-family="system-ui, sans-serif" font-size="13" fill="#242424">3) steal половины у соседа</text>
+  <line x1="205" y1="120" x2="398" y2="120" stroke="#0D7680" marker-end="url(#s42)"/>
+  <text x="250" y="110" font-family="system-ui, sans-serif" font-size="12" fill="#0D7680">крадёт половину</text>
+  </svg>
+
+  ## Блокирующий syscall и handoff
+
+  Самая тонкая часть — что происходит при блокирующем системном вызове. Если бы M просто завис в ядре вместе со своим P, то один зависший `read()` вычёркивал бы из работы целое ядро. Поэтому перед входом в syscall вызывается `entersyscall`, который **отвязывает P от M** (handoff). Освободившийся P может тут же подхватить другой (или новый) M и продолжить выполнять готовые горутины из очереди, пока M0 висит в ядре.
+
+  <svg viewBox="0 0 720 250" role="img" aria-label="Handoff при блокирующем syscall: M с горутиной уходит в ядро, а P отвязывается и подхватывается свободным потоком M2">
+  <defs>
+  <marker id="s43" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#757575"/>
+  </marker>
+  </defs>
+  <rect x="30" y="24" width="210" height="56" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="44" y="47" font-family="system-ui, sans-serif" font-size="13" fill="#242424">M0 · выполняет G</text>
+  <text x="44" y="67" font-family="system-ui, sans-serif" font-size="12" fill="#757575">входит в блокирующий syscall</text>
+  <rect x="440" y="24" width="250" height="56" rx="6" fill="none" stroke="#B4552D"/>
+  <text x="454" y="47" font-family="system-ui, sans-serif" font-size="13" fill="#B4552D">ядро: M0 + G заблокированы</text>
+  <text x="454" y="67" font-family="system-ui, sans-serif" font-size="12" fill="#757575">поток висит, ядро не занято</text>
+  <line x1="242" y1="52" x2="438" y2="52" stroke="#757575" marker-end="url(#s43)"/>
+  <text x="270" y="42" font-family="system-ui, sans-serif" font-size="12" fill="#757575">entersyscall → handoff P</text>
+  <rect x="30" y="140" width="150" height="48" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="44" y="169" font-family="system-ui, sans-serif" font-size="13" fill="#242424">P (отвязан)</text>
+  <rect x="270" y="140" width="200" height="48" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="284" y="169" font-family="system-ui, sans-serif" font-size="13" fill="#242424">M2 · свободный поток</text>
+  <line x1="182" y1="164" x2="268" y2="164" stroke="#757575" marker-end="url(#s43)"/>
+  <rect x="510" y="140" width="180" height="48" rx="6" fill="none" stroke="#E6E6E6"/>
+  <text x="524" y="169" font-family="system-ui, sans-serif" font-size="12" fill="#757575">готовые G продолжают</text>
+  <line x1="472" y1="164" x2="508" y2="164" stroke="#757575" marker-end="url(#s43)"/>
+  <text x="30" y="222" font-family="system-ui, sans-serif" font-size="12" fill="#757575">возврат: exitsyscall пытается вернуть P; если не вышло — G в очередь, M0 паркуется</text>
+  </svg>
+
+  Для сетевого и файлового I/O работает ещё изящнее: дескриптор регистрируется в epoll/kqueue через **netpoller**, горутина паркуется, а M вообще не блокируется. Готовые события netpoller позже возвращает планировщику. За «застрявшими» потоками присматривает фоновый монитор **sysmon**: он отбирает P у M, зависших в долгом syscall (`retake`), и умеет прерывать горутины, работающие дольше ~10 мс.
+
+  Про прерывание: с Go 1.14 действует **асинхронная преемпция**. Раньше горутину можно было снять только в safe-point (в точке вызова функции), поэтому горячий `for {}` без вызовов мог намертво повесить GC. Теперь sysmon шлёт потоку сигнал `SIGURG`, и обработчик останавливает даже tight loop.
+
+  ## Типичные заблуждения
+
+  - **«Горутина — это поток».** Нет: горутины мультиплексируются на небольшое число M. Поток дорог (мегабайты стека, планирование ядром), горутина дешева (~2 КБ, планирование в user space).
+  - **«`GOMAXPROCS` — это лимит на число горутин».** Нет, это число P, то есть предел параллельно исполняемого Go-кода. Горутин при этом миллионы.
+  - **«Блокирующий syscall останавливает всю программу».** Нет — благодаря handoff освободившийся P продолжает работать на другом M.
+  - **«Планировщик справедливый».** Он throughput-ориентированный, не строго справедливый и не приоритетный; `runnext` даёт свежей горутине фору.
+
+  ## Что отвечать на собеседовании
+
+  - Опишите триаду: **G** — горутина, **M** — поток ОС, **P** — контекст с локальной очередью; для исполнения Go-кода M нужен P, число P = `GOMAXPROCS`.
+  - Объясните две очереди и **work stealing**: локальная runq без локов + глобальная; пустой P добирает работу из global runq, netpoller и крадёт у соседей.
+  - Расскажите про **handoff** при блокирующем syscall и про **netpoller**, чтобы показать, почему ядра не простаивают на I/O.
+  - Упомяните **async preemption (1.14)** и `SIGURG` как ответ на вопрос про зависающий `for {}` — это отличает senior от staff.
+related_questions: [goroutine-scheduler-gmp, channel-internals-hchan, go-memory-model-happens-before, context-cancellation-internals]
+related_tasks: [worker-pool-limits, merge-channels]

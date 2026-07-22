@@ -1,0 +1,241 @@
+slug: ring-buffer
+kind: go
+title: "Ring Buffer (кольцевой буфер)"
+difficulty: middle
+tags: [ring-buffer, data-structures, concurrency]
+statement_md: |
+  Реализуйте потокобезопасный кольцевой буфер фиксированной ёмкости, который
+  хранит последние `size` добавленных элементов. Такой буфер держат, чтобы иметь
+  «хвост» последних событий (например, N последних записей перед сбоем).
+
+  ```go
+  func NewRingBuffer[T any](size int) *RingBuffer[T]
+  func (r *RingBuffer[T]) Push(v T)      // добавить элемент
+  func (r *RingBuffer[T]) Snapshot() []T // копия элементов от старого к новому
+  func (r *RingBuffer[T]) Len() int      // текущее число элементов
+  ```
+
+  Требования:
+
+  - `Push` при заполненном буфере перезаписывает самый старый элемент.
+  - `Snapshot` возвращает **новый** слайс с элементами в порядке от старого к
+    новому; на пустом буфере — пустой слайс.
+  - Методы вызываются из нескольких горутин одновременно, доступ к внутреннему
+    состоянию должен быть безопасным (проверяется под `-race`).
+
+  Пример: в буфер ёмкости 5 кладём 1..8 → `Snapshot()` вернёт `[4 5 6 7 8]`.
+starter_code: |
+  package main
+
+  // RingBuffer — потокобезопасный кольцевой буфер на последние size элементов.
+  type RingBuffer[T any] struct {
+      // TODO: поля буфера (данные, позиция записи, счётчик, mutex)
+      size int
+  }
+
+  // NewRingBuffer создаёт кольцевой буфер ёмкости size.
+  func NewRingBuffer[T any](size int) *RingBuffer[T] {
+      return &RingBuffer[T]{size: size}
+  }
+
+  // Push добавляет элемент, вытесняя самый старый при переполнении.
+  func (r *RingBuffer[T]) Push(v T) {
+      // TODO
+  }
+
+  // Snapshot возвращает элементы в порядке от старого к новому.
+  func (r *RingBuffer[T]) Snapshot() []T {
+      // TODO
+      return nil
+  }
+
+  // Len возвращает текущее число элементов.
+  func (r *RingBuffer[T]) Len() int {
+      // TODO
+      return 0
+  }
+hints:
+  - "Не двигайте элементы при переполнении — держите индекс head (куда писать следующий) и счётчик заполнения. Физический массив фиксирован, «сдвигается» только логическое начало."
+  - "Всё состояние (массив, head, count) меняется в Push и читается в Snapshot из разных горутин — заверните каждый метод в один sync.Mutex. Начало данных вычисляется как (head - count + size) % size."
+  - "Snapshot должен отдавать копию: пройдите count элементов начиная с start = (head - count + size) % size, читая buf[(start+i) % size] в новый слайс. Возврат внутреннего среза допустил бы гонку и мутацию извне."
+solution_md: |
+  ### Идея
+
+  Кольцевой буфер хранит данные в массиве фиксированного размера и не двигает
+  элементы при переполнении. Индекс `head` указывает, куда писать следующий
+  элемент, `count` — сколько ячеек занято. При добавлении пишем в `buf[head]`,
+  сдвигаем `head` по модулю `size`; пока буфер не полон — растим `count`.
+
+  Начало «логической» последовательности (самый старый элемент) — это индекс
+  `(head - count + size) % size`. Snapshot проходит `count` элементов от него по
+  кругу и **копирует** их в новый слайс: возвращать внутренний массив нельзя,
+  иначе вызывающий код увидит гонку и сможет испортить данные.
+
+  Потокобезопасность даёт один `sync.Mutex` — и запись, и чтение короткие,
+  RWMutex здесь избыточен.
+
+  ### Эталонное решение
+
+  ```go
+  import "sync"
+
+  type RingBuffer[T any] struct {
+      mu    sync.Mutex
+      buf   []T
+      head  int
+      count int
+      size  int
+  }
+
+  func NewRingBuffer[T any](size int) *RingBuffer[T] {
+      if size < 1 {
+          size = 1
+      }
+      return &RingBuffer[T]{buf: make([]T, size), size: size}
+  }
+
+  func (r *RingBuffer[T]) Push(v T) {
+      r.mu.Lock()
+      defer r.mu.Unlock()
+      r.buf[r.head] = v
+      r.head = (r.head + 1) % r.size
+      if r.count < r.size {
+          r.count++
+      }
+  }
+
+  func (r *RingBuffer[T]) Snapshot() []T {
+      r.mu.Lock()
+      defer r.mu.Unlock()
+      out := make([]T, r.count)
+      start := (r.head - r.count + r.size) % r.size
+      for i := 0; i < r.count; i++ {
+          out[i] = r.buf[(start+i)%r.size]
+      }
+      return out
+  }
+
+  func (r *RingBuffer[T]) Len() int {
+      r.mu.Lock()
+      defer r.mu.Unlock()
+      return r.count
+  }
+  ```
+
+  Сложность: `Push` — `O(1)`, `Snapshot` — `O(count)`, память — `O(size)`.
+
+  ### Типичные ошибки на интервью
+
+  - Сдвигать элементы слайсом (append(buf[1:], v)) — это O(n) на каждый Push и теряет смысл кольца.
+  - Возвращать внутренний слайс из Snapshot — гонка чтения/записи и мутация буфера извне.
+  - Забыть про модульную арифметику для start и получить отрицательный индекс.
+  - Не ограничить рост count значением size.
+time_limit_sec: 12
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "testing"
+  )
+
+  func eqInts(a, b []int) bool {
+      if len(a) != len(b) {
+          return false
+      }
+      for i := range a {
+          if a[i] != b[i] {
+              return false
+          }
+      }
+      return true
+  }
+
+  func TestRingOverflowKeepsLast(t *testing.T) {
+      r := NewRingBuffer[int](5)
+      for i := 1; i <= 8; i++ {
+          r.Push(i)
+      }
+      got := r.Snapshot()
+      want := []int{4, 5, 6, 7, 8}
+      if !eqInts(got, want) {
+          t.Fatalf("Snapshot() = %v, want %v", got, want)
+      }
+      if r.Len() != 5 {
+          t.Fatalf("Len() = %d, want 5", r.Len())
+      }
+  }
+
+  func TestRingPartialFill(t *testing.T) {
+      r := NewRingBuffer[int](5)
+      r.Push(1)
+      r.Push(2)
+      r.Push(3)
+      got := r.Snapshot()
+      want := []int{1, 2, 3}
+      if !eqInts(got, want) {
+          t.Fatalf("Snapshot() = %v, want %v", got, want)
+      }
+      if r.Len() != 3 {
+          t.Fatalf("Len() = %d, want 3", r.Len())
+      }
+  }
+
+  func TestRingEmpty(t *testing.T) {
+      r := NewRingBuffer[int](3)
+      if got := r.Snapshot(); len(got) != 0 {
+          t.Fatalf("Snapshot() on empty = %v, want empty", got)
+      }
+      if r.Len() != 0 {
+          t.Fatalf("Len() = %d, want 0", r.Len())
+      }
+  }
+
+  func TestRingConcurrentPush(t *testing.T) {
+      const (
+          size       = 64
+          goroutines = 50
+          perG       = 200
+      )
+      r := NewRingBuffer[int](size)
+      var wg sync.WaitGroup
+      // Concurrent writers.
+      for g := 0; g < goroutines; g++ {
+          wg.Add(1)
+          go func() {
+              defer wg.Done()
+              for i := 0; i < perG; i++ {
+                  r.Push(i)
+              }
+          }()
+      }
+      // Concurrent reader racing against writers (must be race-free).
+      stop := make(chan struct{})
+      var rwg sync.WaitGroup
+      rwg.Add(1)
+      go func() {
+          defer rwg.Done()
+          for {
+              select {
+              case <-stop:
+                  return
+              default:
+                  snap := r.Snapshot()
+                  if len(snap) > size {
+                      t.Errorf("Snapshot len %d exceeds size %d", len(snap), size)
+                      return
+                  }
+              }
+          }
+      }()
+      wg.Wait()
+      close(stop)
+      rwg.Wait()
+      if got := r.Len(); got != size {
+          t.Fatalf("after %d pushes Len() = %d, want %d", goroutines*perG, got, size)
+      }
+      if got := len(r.Snapshot()); got != size {
+          t.Fatalf("Snapshot len = %d, want %d", got, size)
+      }
+  }

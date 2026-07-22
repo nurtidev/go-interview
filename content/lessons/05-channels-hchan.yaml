@@ -1,0 +1,126 @@
+slug: channels-hchan
+topic: go-internals
+title: "Каналы изнутри: hchan"
+minutes: 8
+tags: [channel, runtime, concurrency]
+body_md: |
+  ## Зачем это знать
+
+  Каналы — это лицо конкурентности в Go, но на собеседовании их редко спрашивают «в лоб». Обычно копают глубже: почему небуферизованный канал синхронный, что физически происходит при `ch <- v`, почему запись в закрытый канал паникует, зачем каналу `nil` внутри `select`. За всеми этими вопросами стоит одна структура рантайма — `hchan`. Как только вы её представляете, каналы перестают быть магией: становится очевидно, где горутина блокируется, где копируются данные и какие happens-before гарантии вы получаете. Это же знание помогает отвечать на «канал или мьютекс?» — вопрос, который любят на senior/staff.
+
+  ## Что такое hchan
+
+  Канал в рантайме — это структура `hchan` под общим мьютексом. Её ключевые поля:
+
+  - `buf` — кольцевой буфер под элементы (только у буферизованных каналов);
+  - `qcount` — сколько элементов сейчас в буфере, `dataqsiz` — его ёмкость;
+  - `sendx` / `recvx` — индексы записи и чтения в кольце;
+  - `sendq` / `recvq` — две очереди заблокированных горутин;
+  - `lock` — мьютекс, защищающий всю структуру.
+
+  <svg viewBox="0 0 720 270" role="img" aria-label="Структура hchan: кольцевой буфер с индексами sendx и recvx, очереди ожидающих sendq и recvq из связанных sudog">
+  <defs>
+  <marker id="s51" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#0D7680"/>
+  </marker>
+  </defs>
+  <text x="30" y="30" font-family="system-ui, sans-serif" font-size="14" fill="#0D7680">hchan · под lock</text>
+  <text x="30" y="72" font-family="system-ui, sans-serif" font-size="13" fill="#757575">buf (кольцевой буфер)</text>
+  <rect x="30" y="82" width="52" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <rect x="86" y="82" width="52" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <rect x="142" y="82" width="52" height="46" rx="6" fill="none" stroke="#E6E6E6"/>
+  <rect x="198" y="82" width="52" height="46" rx="6" fill="none" stroke="#E6E6E6"/>
+  <text x="52" y="150" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">recvx</text>
+  <text x="164" y="150" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">sendx</text>
+  <line x1="52" y1="134" x2="52" y2="128" stroke="#757575" marker-end="url(#s51)"/>
+  <line x1="164" y1="134" x2="164" y2="128" stroke="#757575" marker-end="url(#s51)"/>
+  <rect x="330" y="60" width="360" height="76" rx="6" fill="none" stroke="#0D7680"/>
+  <text x="344" y="82" font-family="system-ui, sans-serif" font-size="13" fill="#242424">recvq · ждут приёма</text>
+  <rect x="344" y="94" width="70" height="30" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="379" y="114" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#242424">sudog</text>
+  <rect x="430" y="94" width="70" height="30" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="465" y="114" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#242424">sudog</text>
+  <line x1="414" y1="109" x2="428" y2="109" stroke="#0D7680" marker-end="url(#s51)"/>
+  <rect x="330" y="168" width="360" height="76" rx="6" fill="none" stroke="#0D7680"/>
+  <text x="344" y="190" font-family="system-ui, sans-serif" font-size="13" fill="#242424">sendq · ждут отправки</text>
+  <rect x="344" y="202" width="70" height="30" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="379" y="222" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#242424">sudog</text>
+  <text x="430" y="222" font-family="system-ui, sans-serif" font-size="12" fill="#757575">→ G, elem, next</text>
+  </svg>
+
+  Каждая заблокированная горутина оборачивается в `sudog` — обёртку с указателем на саму G, на элемент данных и на соседа в очереди. Именно из sudog-ов складываются `sendq` и `recvq`.
+
+  ## Отправка и приём: прямая передача
+
+  Логика `ch <- v` в порядке приоритета:
+
+  1. Если в `recvq` уже кто-то ждёт — данные копируются **напрямую в стек получателя**, минуя буфер, и получатель будится. Это `sendDirect`: быстрый путь без промежуточного копирования в кольцо.
+  2. Иначе, если в буфере есть место — кладём в `buf[sendx]`, двигаем индекс.
+  3. Иначе — заворачиваем горутину в `sudog`, ставим в `sendq` и паркуем (`gopark`).
+
+  Приём `<-ch` симметричен. Прямая передача — важная деталь: для небуферизованного канала это единственный путь, поэтому он всегда синхронный, всегда точка рандеву двух горутин.
+
+  <svg viewBox="0 0 720 180" role="img" aria-label="Прямая передача: отправитель находит ждущего получателя в recvq и копирует значение прямо в его стек через sendDirect, минуя буфер">
+  <defs>
+  <marker id="s52" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#0D7680"/>
+  </marker>
+  </defs>
+  <rect x="30" y="60" width="180" height="60" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="120" y="86" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">G-отправитель</text>
+  <text x="120" y="106" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">ch &lt;- v</text>
+  <rect x="510" y="60" width="180" height="60" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="600" y="86" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">G-получатель</text>
+  <text x="600" y="106" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">ждёт в recvq</text>
+  <line x1="212" y1="90" x2="508" y2="90" stroke="#0D7680" marker-end="url(#s52)"/>
+  <text x="360" y="78" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">sendDirect: memmove в стек получателя</text>
+  <text x="360" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">буфер не задействован → получатель будится (goready)</text>
+  </svg>
+
+  ## Блокировка на пустом канале
+
+  Что происходит, когда горутина читает из пустого канала, а отправителя нет? Она не крутится в цикле и не жжёт CPU — она **паркуется**. Рантайм создаёт для неё `sudog`, ставит его в `recvq`, вызывает `gopark`, и планировщик снимает горутину с потока, отдавая M другой работе. Когда придёт отправитель, он найдёт этот sudog, положит значение и вызовет `goready` — горутина вернётся в очередь готовых.
+
+  <svg viewBox="0 0 720 190" role="img" aria-label="Блокировка на пустом канале: получатель встаёт в recvq и паркуется, позже отправитель кладёт значение и будит его">
+  <defs>
+  <marker id="s53" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+  <path d="M0 0 L10 5 L0 10 Z" fill="#0D7680"/>
+  </marker>
+  </defs>
+  <rect x="30" y="40" width="200" height="54" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="130" y="63" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">&lt;-ch, буфер пуст</text>
+  <text x="130" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">отправителя нет</text>
+  <rect x="290" y="40" width="180" height="54" rx="6" fill="none" stroke="#0D7680"/>
+  <text x="380" y="63" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">sudog → recvq</text>
+  <text x="380" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">gopark (снята с M)</text>
+  <rect x="530" y="40" width="160" height="54" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+  <text x="610" y="63" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">приходит sender</text>
+  <text x="610" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">goready</text>
+  <line x1="232" y1="67" x2="288" y2="67" stroke="#0D7680" marker-end="url(#s53)"/>
+  <line x1="472" y1="67" x2="528" y2="67" stroke="#0D7680" marker-end="url(#s53)"/>
+  <text x="360" y="150" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#757575">пока горутина спит, CPU не тратится — это не busy-wait</text>
+  </svg>
+
+  Закрытие `close(ch)` выставляет флаг `closed` под локом и будит **все** горутины из обеих очередей: получатели забирают нулевое значение и `ok=false`, а вот отправители из `sendq` — паникуют. Отсюда прод-правило: «канал закрывает только отправитель, и только один». Двойной `close` и `close(nil)` тоже паникуют. Отдельный случай — `nil`-канал: и отправка, и приём блокируются навсегда, что полезно в `select`, чтобы динамически «выключить» ветку, присвоив каналу `nil`.
+
+  ## select и happens-before
+
+  Та же механика sudog объясняет `select`. Когда горутина ждёт сразу на нескольких каналах, для каждого канала создаётся отдельный `sudog`, и они ставятся во все соответствующие очереди. Как только одна из операций становится готова, горутина будится, а остальные её sudog-и снимаются из очередей. Порядок проверки case-ов рандомизирован — это защита от голодания, чтобы один всегда-готовый канал не забивал остальные. Ветка `default` даёт неблокирующую попытку: если ни один канал не готов прямо сейчас, `select` не паркуется, а сразу идёт в `default`.
+
+  Наконец, канал — это не только труба для данных, но и средство синхронизации памяти. Гарантии happens-before: отправка в канал happens-before завершения соответствующего приёма; для небуферизованного канала приём happens-before завершения отправки; а закрытие канала happens-before приёма нулевого значения, вызванного этим закрытием. Именно поэтому «передал данные через канал» автоматически означает «сделал их видимыми принимающей горутине» — без дополнительных мьютексов.
+
+  ## Типичные заблуждения
+
+  - **«Горутина на пустом канале крутится в цикле».** Нет, она паркуется и не потребляет CPU до пробуждения.
+  - **«Данные всегда идут через буфер».** Нет: при готовом получателе работает прямая передача в его стек, минуя `buf`; у небуферизованного канала это единственный путь.
+  - **«От записи в закрытый канал можно защититься проверкой `if !closed`».** Нет — между проверкой и записью канал может закрыться, это TOCTOU-гонка. Защита — единоличное владение отправителя и отдельный `done`-канал в `select`.
+  - **«Канал всегда лучше мьютекса».** На горячем пути канал дороже: парковка/пробуждение горутин и лок. Для простого счётчика или флага берут atomic; канал — когда нужна именно передача владения или сигнализация.
+
+  ## Что отвечать на собеседовании
+
+  - Назовите поля `hchan`: кольцевой `buf` с `sendx`/`recvx`, `qcount`/`dataqsiz`, две очереди `sendq`/`recvq` из `sudog` и общий `lock`.
+  - Опишите три ветки отправки, выделив **прямую передачу** (`sendDirect`) — это объясняет, почему небуферизованный канал синхронный.
+  - Скажите, что блокировка — это `gopark`/`goready`, а не busy-wait; горутина снимается с потока.
+  - Разберите семантику `close` (будит всех, отправители паникуют) и `nil`-канала в `select`, и упомяните happens-before: отправка happens-before завершения приёма.
+related_questions: [channel-internals-hchan, go-memory-model-happens-before, channels-buffered-ownership, select-patterns-timeout]
+related_tasks: [merge-channels]

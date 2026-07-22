@@ -1,0 +1,143 @@
+slug: interfaces-iface
+topic: go-internals
+title: "Интерфейсы: iface, eface и typed nil"
+minutes: 8
+tags: [interface, iface, nil]
+body_md: |
+  ## Зачем это знать
+
+  Интерфейсы — место, где Go-собеседование любит ловить на деталях. «Что такое eface и iface?», «почему typed nil не равен nil?», «когда упаковка в интерфейс аллоцирует?», «как работает динамический вызов метода?» — все эти вопросы про одно: интерфейс в рантайме это не «объект», а пара из двух машинных слов. Кто это понимает, у того и знаменитая ловушка с nil-указателем в `error` перестаёт быть магией. Разберём обе формы интерфейса, таблицу методов и главный трюк с typed nil.
+
+  ## Два слова: eface и iface
+
+  Любой интерфейс в памяти — ровно два указателя. Разница в первом слове. Пустой интерфейс `interface{}` (он же `any`) — это `eface`: первое слово — указатель на `_type` (полное описание конкретного типа), второе — `data` (указатель на сами данные). Непустой интерфейс с методами — это `iface`: первое слово — указатель на `itab`, второе — тот же `data`.
+
+  <svg viewBox="0 0 720 200" role="img" aria-label="Два слова интерфейса: eface хранит указатель на тип и данные, iface — указатель на itab и данные; второе слово в обоих указывает на значение">
+    <defs>
+      <marker id="if-arw1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+    </defs>
+    <text x="30" y="22" font-family="system-ui, sans-serif" font-size="14" fill="#242424">eface — interface{} (any): два слова</text>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="30" y="32" width="150" height="48" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="105" y="61" text-anchor="middle">*_type</text>
+      <rect x="180" y="32" width="150" height="48" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="255" y="61" text-anchor="middle">data ●</text>
+    </g>
+    <text x="105" y="98" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#757575">описание типа</text>
+    <text x="30" y="132" font-family="system-ui, sans-serif" font-size="14" fill="#242424">iface — интерфейс с методами: два слова</text>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="30" y="142" width="150" height="48" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="105" y="171" text-anchor="middle">*itab</text>
+      <rect x="180" y="142" width="150" height="48" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="255" y="171" text-anchor="middle">data ●</text>
+    </g>
+    <rect x="470" y="78" width="200" height="66" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+    <text x="570" y="108" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">значение</text>
+    <text x="570" y="128" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#757575">в куче или на стеке</text>
+    <path d="M332 56 L466 100" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#if-arw1)"/>
+    <path d="M332 166 L466 122" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#if-arw1)"/>
+  </svg>
+
+  Второе слово всегда `data` — указатель на значение. Если значение больше указателя или его адрес «убегает» в интерфейс, оно переезжает в кучу (упаковка = потенциальная аллокация); мелкие значения рантайм иногда умеет не аллоцировать. Ключевой момент для ловушек: интерфейс равен `nil`, только когда оба слова нулевые.
+
+  ## itab и динамический диспатч
+
+  `itab` — это кэш связки «конкретный тип + интерфейс». Внутри: указатель на описание интерфейса, указатель на `_type` конкретного типа, хеш и главное — массив `fun` с адресами методов конкретного типа, разложенных в порядке методов интерфейса.
+
+  <svg viewBox="0 0 720 200" role="img" aria-label="Структура iface: слово указывает на itab и data; itab хранит тип и массив fun с адресами методов, через который идёт динамический диспатч">
+    <defs>
+      <marker id="if-arw2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#0D7680"/>
+      </marker>
+    </defs>
+    <g font-family="system-ui, sans-serif" font-size="14" fill="#242424">
+      <rect x="24" y="50" width="100" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <rect x="124" y="50" width="100" height="44" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="74" y="77" text-anchor="middle">*itab</text>
+      <text x="174" y="77" text-anchor="middle">data</text>
+    </g>
+    <path d="M124 62 L286 58" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#if-arw2)"/>
+    <rect x="290" y="34" width="220" height="140" rx="6" fill="none" stroke="#0D7680"/>
+    <text x="400" y="54" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#757575">itab (кэш: конкретный тип + интерфейс)</text>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#242424">
+      <text x="304" y="82">inter — тип интерфейса</text>
+      <text x="304" y="106">_type — конкретный тип</text>
+      <text x="304" y="130">hash</text>
+      <text x="304" y="156" fill="#0D7680">fun[k] → адреса методов ●</text>
+    </g>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#242424">
+      <rect x="560" y="60" width="140" height="34" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="630" y="82" text-anchor="middle">(*T).Write</text>
+      <rect x="560" y="108" width="140" height="34" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="630" y="130" text-anchor="middle">(*T).Close</text>
+    </g>
+    <path d="M512 150 L556 80" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#if-arw2)"/>
+    <path d="M512 154 L556 126" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#if-arw2)"/>
+    <rect x="110" y="150" width="170" height="38" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+    <text x="195" y="174" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#242424">значение (получатель)</text>
+    <path d="M174 96 L190 148" fill="none" stroke="#0D7680" stroke-width="2" marker-end="url(#if-arw2)"/>
+  </svg>
+
+  Вызов `w.Write(p)` через интерфейс — это динамический диспатч: берём `itab.fun[k]` (адрес нужного метода конкретного типа) и прыгаем туда, передав `data` как получателя. `itab` строится один раз на пару (тип, интерфейс) и кэшируется в глобальной `itabTable`, поэтому повторные вызовы не платят за поиск. В отличие от C++ здесь нет vtable-указателя внутри объекта — таблица живёт «сбоку», в интерфейсном слове.
+
+  Обратная операция — распаковка через type assertion `v, ok := i.(T)`: рантайм сравнивает `_type`/`itab` интерфейса с искомым типом, это дешёвая проверка указателя, а не рефлексия; `type switch` устроен так же — серия сравнений `itab`. Дорогое здесь не сравнение, а упаковка: если в горячем цикле складывать значения в `any`, каждый примитив, не влезающий в слово-указатель, может уехать в кучу — это ловят через `go build -gcflags=-m` (escape-анализ).
+
+  ## Классика: typed nil ≠ nil
+
+  Теперь главная ловушка. Положим в интерфейс типизированный nil-указатель.
+
+  ```go
+  type MyError struct{}
+  func (e *MyError) Error() string { return "boom" }
+
+  func do() error {
+      var e *MyError = nil
+      return e            // упаковываем (*MyError)(nil) в error
+  }
+
+  func main() {
+      err := do()
+      fmt.Println(err == nil) // false!
+  }
+  ```
+
+  <svg viewBox="0 0 720 148" role="img" aria-label="typed nil: интерфейс error с типом MyError и нулевыми данными не равен nil, тогда как интерфейс с обоими нулевыми словами равен nil">
+    <text x="30" y="20" font-family="system-ui, sans-serif" font-size="14" fill="#242424">Почему typed nil в error не равен nil</text>
+    <text x="30" y="46" font-family="system-ui, sans-serif" font-size="13" fill="#757575">return (*MyError)(nil) как error</text>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#242424">
+      <rect x="30" y="54" width="150" height="46" rx="6" fill="#E6F2F3" stroke="#0D7680"/>
+      <text x="105" y="82" text-anchor="middle">type = *MyError</text>
+      <rect x="180" y="54" width="150" height="46" rx="6" fill="none" stroke="#E6E6E6"/>
+      <text x="255" y="82" text-anchor="middle" fill="#757575">data = nil</text>
+    </g>
+    <text x="30" y="126" font-family="system-ui, sans-serif" font-size="13" fill="#B4552D">err == nil → false (слот типа занят)</text>
+    <text x="400" y="46" font-family="system-ui, sans-serif" font-size="13" fill="#757575">var err error = nil</text>
+    <g font-family="system-ui, sans-serif" font-size="13" fill="#757575">
+      <rect x="400" y="54" width="140" height="46" rx="6" fill="none" stroke="#E6E6E6"/>
+      <text x="470" y="82" text-anchor="middle">type = nil</text>
+      <rect x="540" y="54" width="140" height="46" rx="6" fill="none" stroke="#E6E6E6"/>
+      <text x="610" y="82" text-anchor="middle">data = nil</text>
+    </g>
+    <text x="400" y="126" font-family="system-ui, sans-serif" font-size="13" fill="#0D7680">err == nil → true (оба слова нули)</text>
+  </svg>
+
+  `err` сравнивается с `nil` как `false`, потому что первое слово интерфейса не пустое: тип `*MyError` записан, хотя `data` действительно нулевой. Интерфейс считается nil только когда оба слова нули, а здесь занят слот типа. Отсюда правило: никогда не возвращайте конкретный типизированный указатель в переменную типа `error` — возвращайте `nil` явным литералом или интерфейс. Особенно коварно это выглядит с именованным возвращаемым значением и `defer`, где легко случайно вернуть typed nil.
+
+  ## Типичные заблуждения
+
+  - «Интерфейс это указатель на объект» — нет, это два слова: (тип/itab, data).
+  - «`eface` и `iface` — синонимы» — `eface` у пустого интерфейса (`_type`, data), `iface` у интерфейса с методами (`itab`, data).
+  - «Если переменная-указатель nil, то и интерфейс с ней nil» — нет: слот типа занят, интерфейс не равен `nil`.
+  - «Вызов метода через интерфейс бесплатен» — есть косвенность через `itab.fun` (динамический диспатч), плюс упаковка может аллоцировать.
+  - «`itab` строится на каждый вызов» — строится один раз на пару (тип, интерфейс) и кэшируется.
+
+  ## Что отвечать на собеседовании
+
+  - Интерфейс — два слова. `eface` = (`_type`, data) для `any`; `iface` = (`itab`, data) для интерфейса с методами.
+  - `itab` кэширует пару (конкретный тип, интерфейс) и хранит `fun` — таблицу адресов методов; вызов идёт через неё (динамический диспатч), таблица кэшируется в `itabTable`.
+  - Интерфейс равен `nil` только когда оба слова нулевые; typed nil (тип есть, data = nil) даёт `i == nil → false`.
+  - Упаковка значения в интерфейс может вызвать аллокацию (escape в кучу); поэтому в горячем коде за интерфейсами следят через escape-анализ.
+related_questions: [interface-iface-eface-nil, escape-analysis-allocations, defer-panic-recover]
+related_tasks: []

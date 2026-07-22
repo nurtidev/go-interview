@@ -1,0 +1,259 @@
+slug: idempotent-payment-handler
+kind: go
+title: "Идемпотентный обработчик платежа"
+difficulty: staff
+tags: [idempotency, concurrency, fintech, singleflight]
+statement_md: |
+  Клиент может повторить запрос на оплату при сетевой ошибке. Реализуйте
+  обработчик, который по ключу идемпотентности выполняет платёж **ровно один
+  раз**, даже если несколько запросов с одним ключом пришли одновременно.
+
+  ```go
+  type PaymentResult struct {
+      TransactionID string
+      Status        string
+  }
+
+  func NewPaymentProcessor(charge func(key string, amount int64) (PaymentResult, error)) *PaymentProcessor
+  func (p *PaymentProcessor) Pay(idempotencyKey string, amount int64) (PaymentResult, error)
+  ```
+
+  Требования:
+
+  - Для одного `idempotencyKey` «дорогая» операция `charge` (списание у внешнего
+    провайдера) вызывается **не более одного раза**.
+  - Конкурентные дубликаты с тем же ключом ждут результат «лидера» и получают тот
+    же `PaymentResult`.
+  - Успешный результат кэшируется: последующие вызовы с тем же ключом возвращают
+    его, не вызывая `charge`.
+  - Ошибка **не кэшируется**: повторный запрос после ошибки пробует `charge`
+    заново (сбои платежа должны быть повторяемы).
+  - Безопасен при конкурентных вызовах (проверяется под `-race`).
+
+  Хранилище здесь in-memory; в проде это была бы БД/Redis, а `charge` — вызов
+  платёжного провайдера.
+starter_code: |
+  package main
+
+  // PaymentResult — итог обработки платежа.
+  type PaymentResult struct {
+      TransactionID string
+      Status        string
+  }
+
+  // PaymentProcessor обрабатывает платёж ровно один раз на ключ идемпотентности,
+  // даже при конкурентных повторных запросах.
+  type PaymentProcessor struct {
+      // TODO: mutex, карта выполняющихся вызовов, кэш результатов, функция charge
+      charge func(key string, amount int64) (PaymentResult, error)
+  }
+
+  // NewPaymentProcessor: charge — «дорогая» операция списания (её нельзя
+  // выполнять дважды по одному ключу).
+  func NewPaymentProcessor(charge func(key string, amount int64) (PaymentResult, error)) *PaymentProcessor {
+      return &PaymentProcessor{charge: charge}
+  }
+
+  // Pay возвращает результат по idempotencyKey. Для одного ключа charge должен
+  // быть вызван не более одного раза; конкурентные дубликаты ждут и получают
+  // тот же результат.
+  func (p *PaymentProcessor) Pay(idempotencyKey string, amount int64) (PaymentResult, error) {
+      // TODO
+      return PaymentResult{}, nil
+  }
+hints:
+  - "Двух состояний недостаточно: кроме кэша готовых результатов нужен реестр «выполняется прямо сейчас», иначе два одновременных запроса оба вызовут charge."
+  - "Это паттерн single-flight: первый запрос по ключу становится «лидером», кладёт в реестр объект вызова с sync.WaitGroup (Add(1)) и выполняет charge. Остальные находят его в реестре и делают wg.Wait(), затем читают тот же результат."
+  - "После завершения удалите ключ из реестра «выполняется», а результат положите в кэш только если ошибки не было. Обе map — под одним sync.Mutex; charge вызывайте вне блокировки, держа лидерство через объект вызова."
+solution_md: |
+  ### Идея
+
+  Идемпотентность на одном кэше результатов не строится: два одновременных
+  запроса с новым ключом оба не найдут готового результата и оба вызовут `charge`.
+  Нужен второй реестр — «выполняется прямо сейчас» (паттерн single-flight).
+
+  Первый запрос по ключу становится лидером: под мьютексом кладёт в реестр объект
+  вызова с `sync.WaitGroup` (`Add(1)`) и отпускает блокировку. `charge`
+  выполняется вне мьютекса (это внешний вызов, держать лок нельзя). Конкурентные
+  дубликаты под мьютексом находят объект лидера, отпускают лок и ждут `wg.Wait()`,
+  после чего читают его `res/err` — так `charge` вызывается один раз.
+
+  По завершении лидер удаляет ключ из реестра «выполняется» и кладёт результат в
+  кэш **только при успехе**. Ошибку не кэшируем, чтобы платёж можно было
+  повторить. `wg.Done()` будит ожидающих.
+
+  ### Эталонное решение
+
+  ```go
+  import "sync"
+
+  type PaymentResult struct {
+      TransactionID string
+      Status        string
+  }
+
+  type call struct {
+      wg  sync.WaitGroup
+      res PaymentResult
+      err error
+  }
+
+  type PaymentProcessor struct {
+      mu       sync.Mutex
+      inflight map[string]*call
+      results  map[string]PaymentResult
+      charge   func(key string, amount int64) (PaymentResult, error)
+  }
+
+  func NewPaymentProcessor(charge func(key string, amount int64) (PaymentResult, error)) *PaymentProcessor {
+      return &PaymentProcessor{
+          inflight: make(map[string]*call),
+          results:  make(map[string]PaymentResult),
+          charge:   charge,
+      }
+  }
+
+  func (p *PaymentProcessor) Pay(idempotencyKey string, amount int64) (PaymentResult, error) {
+      p.mu.Lock()
+      if r, ok := p.results[idempotencyKey]; ok {
+          p.mu.Unlock()
+          return r, nil
+      }
+      if c, ok := p.inflight[idempotencyKey]; ok {
+          p.mu.Unlock()
+          c.wg.Wait()
+          return c.res, c.err
+      }
+      c := &call{}
+      c.wg.Add(1)
+      p.inflight[idempotencyKey] = c
+      p.mu.Unlock()
+
+      c.res, c.err = p.charge(idempotencyKey, amount)
+
+      p.mu.Lock()
+      delete(p.inflight, idempotencyKey)
+      if c.err == nil {
+          p.results[idempotencyKey] = c.res
+      }
+      p.mu.Unlock()
+
+      c.wg.Done()
+      return c.res, c.err
+  }
+  ```
+
+  Сложность: `charge` — один раз на ключ; накладные расходы — `O(1)` на запрос плюс ожидание лидера у дубликатов.
+
+  ### Типичные ошибки на интервью
+
+  - Проверять только кэш результатов без реестра «выполняется» — конкурентные дубликаты вызовут charge несколько раз.
+  - Держать мьютекс во время charge — сериализация всех платежей и блокировка на время внешнего вызова.
+  - Кэшировать ошибку — клиент навсегда получает отказ и не может повторить платёж.
+  - Не удалить ключ из реестра «выполняется» после сбоя — повтор зависнет в ожидании несуществующего лидера.
+time_limit_sec: 18
+race: true
+test_code: |
+  package main
+
+  import (
+      "errors"
+      "strconv"
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestPayConcurrentSameKeyChargesOnce(t *testing.T) {
+      var charges int64
+      p := NewPaymentProcessor(func(key string, amount int64) (PaymentResult, error) {
+          n := atomic.AddInt64(&charges, 1)
+          time.Sleep(5 * time.Millisecond) // окно для гонки лидеров
+          return PaymentResult{TransactionID: "tx-" + strconv.FormatInt(n, 10), Status: "confirmed"}, nil
+      })
+
+      const goroutines = 100
+      results := make([]PaymentResult, goroutines)
+      var wg sync.WaitGroup
+      for g := 0; g < goroutines; g++ {
+          wg.Add(1)
+          go func(g int) {
+              defer wg.Done()
+              r, err := p.Pay("order-1", 500)
+              if err != nil {
+                  t.Errorf("Pay err = %v", err)
+              }
+              results[g] = r
+          }(g)
+      }
+      wg.Wait()
+
+      if got := atomic.LoadInt64(&charges); got != 1 {
+          t.Fatalf("charge called %d times, want exactly 1", got)
+      }
+      first := results[0].TransactionID
+      if first == "" {
+          t.Fatalf("empty transaction id")
+      }
+      for g := 1; g < goroutines; g++ {
+          if results[g].TransactionID != first {
+              t.Fatalf("result[%d] = %q, want same %q for all", g, results[g].TransactionID, first)
+          }
+      }
+  }
+
+  func TestPayCachesCompletedResult(t *testing.T) {
+      var charges int64
+      p := NewPaymentProcessor(func(key string, amount int64) (PaymentResult, error) {
+          atomic.AddInt64(&charges, 1)
+          return PaymentResult{TransactionID: "tx", Status: "confirmed"}, nil
+      })
+      r1, _ := p.Pay("k", 10)
+      r2, _ := p.Pay("k", 10)
+      if r1 != r2 {
+          t.Fatalf("repeat result differs: %v vs %v", r1, r2)
+      }
+      if got := atomic.LoadInt64(&charges); got != 1 {
+          t.Fatalf("charge called %d times on repeat, want 1", got)
+      }
+  }
+
+  func TestPayDistinctKeys(t *testing.T) {
+      var charges int64
+      p := NewPaymentProcessor(func(key string, amount int64) (PaymentResult, error) {
+          atomic.AddInt64(&charges, 1)
+          return PaymentResult{TransactionID: key, Status: "confirmed"}, nil
+      })
+      p.Pay("a", 1)
+      p.Pay("b", 1)
+      if got := atomic.LoadInt64(&charges); got != 2 {
+          t.Fatalf("charge called %d times for 2 keys, want 2", got)
+      }
+  }
+
+  func TestPayErrorNotCached(t *testing.T) {
+      var charges int64
+      fail := errors.New("declined")
+      p := NewPaymentProcessor(func(key string, amount int64) (PaymentResult, error) {
+          n := atomic.AddInt64(&charges, 1)
+          if n == 1 {
+              return PaymentResult{}, fail
+          }
+          return PaymentResult{TransactionID: "tx", Status: "confirmed"}, nil
+      })
+      if _, err := p.Pay("k", 10); !errors.Is(err, fail) {
+          t.Fatalf("first Pay err = %v, want declined", err)
+      }
+      // Ошибка не кэшируется — повтор запускает charge заново и проходит.
+      r, err := p.Pay("k", 10)
+      if err != nil {
+          t.Fatalf("retry Pay err = %v, want nil", err)
+      }
+      if r.Status != "confirmed" {
+          t.Fatalf("retry status = %q, want confirmed", r.Status)
+      }
+      if got := atomic.LoadInt64(&charges); got != 2 {
+          t.Fatalf("charge called %d times, want 2", got)
+      }
+  }

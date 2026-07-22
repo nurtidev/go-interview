@@ -1,0 +1,76 @@
+slug: second-highest-salary
+kind: sql
+title: "Вторая по величине зарплата"
+difficulty: senior
+tags: [subquery, window-function, distinct]
+statement_md: |
+  Есть таблица сотрудников `employees` со столбцом `salary`. Найдите **вторую по
+  величине уникальную** зарплату.
+
+  «Уникальную» означает: если максимальная зарплата встречается у нескольких
+  сотрудников, все они считаются за первое место, а второй результат — это
+  следующее по величине **отличающееся** значение.
+
+  Верните один столбец `second_highest` с одной строкой. Если второй уникальной
+  зарплаты нет, вернётся `NULL`.
+starter_code: |
+  -- Верните вторую по величине уникальную зарплату как second_highest.
+  SELECT ...
+hints:
+  - "Дубликаты максимума не должны мешать. Что если сначала найти максимум, а затем — максимум среди всех зарплат, которые строго меньше него?"
+  - "Подзапрос: MAX(salary) среди строк, где salary < (SELECT MAX(salary) FROM employees). Это автоматически пропускает все дубликаты первого места."
+  - "Альтернатива — оконная функция DENSE_RANK() OVER (ORDER BY salary DESC): она даёт одинаковый ранг равным зарплатам, и нужен ранг = 2. Именно DENSE_RANK, а не RANK/ROW_NUMBER, чтобы дубликаты не сдвигали нумерацию."
+solution_md: |
+  ### Идея
+
+  Главная ловушка — дубликаты. Простой способ: найти максимальную зарплату, а
+  затем взять максимум среди зарплат, которые строго меньше неё. Условие
+  `salary < MAX(salary)` разом отбрасывает все дубликаты первого места, а
+  внешний `MAX` корректно вернёт `NULL`, если второго значения нет.
+
+  ### Эталонный запрос
+
+  ```sql
+  SELECT MAX(salary) AS second_highest
+  FROM employees
+  WHERE salary < (SELECT MAX(salary) FROM employees);
+  ```
+
+  ### Альтернатива через оконную функцию
+
+  ```sql
+  SELECT salary AS second_highest
+  FROM (
+    SELECT salary, DENSE_RANK() OVER (ORDER BY salary DESC) AS rnk
+    FROM employees
+  ) t
+  WHERE rnk = 2
+  LIMIT 1;
+  ```
+
+  Важно использовать `DENSE_RANK`, а не `RANK` или `ROW_NUMBER`: `DENSE_RANK`
+  даёт равным зарплатам одинаковый ранг и не оставляет «дыр» в нумерации.
+
+  ### Типичные ошибки на интервью
+
+  - `ORDER BY salary DESC LIMIT 1 OFFSET 1` — вернёт дубликат максимума, а не следующее значение.
+  - Использовать `ROW_NUMBER`/`RANK` вместо `DENSE_RANK` — дубликаты сдвинут нумерацию.
+  - Не обработать случай отсутствия второй зарплаты — правильный ответ здесь `NULL` (подзапрос с `MAX` это даёт автоматически).
+schema_sql: |
+  CREATE TABLE employees (
+    id     INTEGER PRIMARY KEY,
+    name   TEXT NOT NULL,
+    salary INTEGER NOT NULL
+  );
+seed_sql: |
+  INSERT INTO employees (id, name, salary) VALUES
+    (1, 'Alice', 100),
+    (2, 'Bob',   200),
+    (3, 'Carol', 200),
+    (4, 'Dave',  150),
+    (5, 'Eve',   90);
+expected:
+  columns: [second_highest]
+  rows:
+    - ["150"]
+  order_matters: false
