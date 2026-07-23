@@ -29,6 +29,11 @@ export interface AuthResponse {
   user: User
 }
 
+/** Публичные, несекретные флаги окружения (GET /api/config, без auth). */
+export interface ConfigResponse {
+  registration_enabled: boolean
+}
+
 export interface Section {
   id: string
   title: string
@@ -325,6 +330,8 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
+  getConfig: () => request<ConfigResponse>('/config', { auth: false }),
+
   register: (email: string, password: string) =>
     request<AuthResponse>('/auth/register', {
       method: 'POST',

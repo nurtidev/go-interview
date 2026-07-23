@@ -2,6 +2,7 @@ import { useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MenuIcon, XIcon } from 'lucide-react'
 import { plural } from '@/lib/format'
+import { useAuth } from '@/lib/auth'
 
 /* ============================================================================
    Лендинг GoPrep — маршрут «/» для гостей (см. design_handoff_goprep/LANDING.md
@@ -122,8 +123,14 @@ function Overline({ children }: { children: ReactNode }) {
 
 export default function LandingPage() {
   const navigate = useNavigate()
+  const { registrationEnabled } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
   const heroCardRef = useRef<HTMLDivElement>(null)
+
+  // Когда регистрация закрыта, все CTA ведут на /login вместо /register, а
+  // основная кнопка «Начать бесплатно» превращается в «Войти».
+  const ctaTarget = registrationEnabled ? '/register' : '/login'
+  const ctaLabel = registrationEnabled ? 'Начать бесплатно' : 'Войти'
 
   function scrollToSection(id: string) {
     setMenuOpen(false)
@@ -161,19 +168,21 @@ export default function LandingPage() {
           </nav>
 
           <div className="ml-auto hidden items-center gap-[10px] md:flex">
+            {registrationEnabled && (
+              <button
+                type="button"
+                onClick={() => navigate('/login')}
+                className="text-[13px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
+              >
+                Войти
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => navigate('/login')}
-              className="text-[13px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
-            >
-              Войти
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate('/register')}
+              onClick={() => navigate(ctaTarget)}
               className="rounded-full bg-ink px-[18px] py-2 text-[13px] font-medium text-bg transition-colors duration-150 ease-out hover:bg-accent-hover"
             >
-              Начать бесплатно
+              {ctaLabel}
             </button>
           </div>
 
@@ -203,19 +212,21 @@ export default function LandingPage() {
               </button>
             ))}
             <div className="mt-1 flex flex-col gap-2 border-t border-hairline pt-3">
+              {registrationEnabled && (
+                <button
+                  type="button"
+                  onClick={() => navigate('/login')}
+                  className="rounded-full border border-ink px-[18px] py-[10px] text-[14px] font-medium text-ink"
+                >
+                  Войти
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => navigate('/login')}
-                className="rounded-full border border-ink px-[18px] py-[10px] text-[14px] font-medium text-ink"
-              >
-                Войти
-              </button>
-              <button
-                type="button"
-                onClick={() => navigate('/register')}
+                onClick={() => navigate(ctaTarget)}
                 className="rounded-full bg-ink px-[18px] py-[11px] text-[14px] font-medium text-bg"
               >
-                Начать бесплатно
+                {ctaLabel}
               </button>
             </div>
           </div>
@@ -256,10 +267,10 @@ export default function LandingPage() {
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
-                onClick={() => navigate('/register')}
+                onClick={() => navigate(ctaTarget)}
                 className="rounded-full bg-ink px-7 py-[13px] text-[15px] font-medium text-bg transition-colors duration-150 ease-out hover:bg-accent-hover"
               >
-                Начать бесплатно
+                {ctaLabel}
               </button>
               <button
                 type="button"
@@ -314,18 +325,21 @@ export default function LandingPage() {
                 </div>
               </div>
 
-              {/* senior — за ссылкой-заглушкой на /register */}
-              <div className="flex items-center gap-[10px] border-t border-hairline pt-3">
-                <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[10.5px] font-medium text-ink">
-                  senior
-                </span>
-                <Link
-                  to="/register"
-                  className="text-[12.5px] font-medium text-ink underline underline-offset-[3px] transition-colors duration-150 ease-out hover:text-accent-hover"
-                >
-                  Раскрыть уровень senior →
-                </Link>
-              </div>
+              {/* senior — за ссылкой-заглушкой на /register. Регистрация закрыта
+                  на этом инстансе → секция-приглашение к регистрации скрыта. */}
+              {registrationEnabled && (
+                <div className="flex items-center gap-[10px] border-t border-hairline pt-3">
+                  <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[10.5px] font-medium text-ink">
+                    senior
+                  </span>
+                  <Link
+                    to="/register"
+                    className="text-[12.5px] font-medium text-ink underline underline-offset-[3px] transition-colors duration-150 ease-out hover:text-accent-hover"
+                  >
+                    Раскрыть уровень senior →
+                  </Link>
+                </div>
+              )}
 
               {/* Кнопки самооценки — декоративные, некликабельные */}
               <div className="flex gap-1.5 border-t border-hairline pt-[14px]" aria-hidden="true">
@@ -544,7 +558,7 @@ export default function LandingPage() {
             </p>
             <button
               type="button"
-              onClick={() => navigate('/register')}
+              onClick={() => navigate(ctaTarget)}
               className="self-start rounded-full border border-ink px-5 py-[10px] text-[14px] font-medium text-ink transition-colors duration-150 ease-out hover:bg-accent-soft"
             >
               Смотреть все темы
@@ -604,10 +618,10 @@ export default function LandingPage() {
           </p>
           <button
             type="button"
-            onClick={() => navigate('/register')}
+            onClick={() => navigate(ctaTarget)}
             className="rounded-full bg-bg px-[30px] py-[14px] text-[15px] font-medium text-ink transition-colors duration-150 ease-out hover:bg-accent-soft"
           >
-            Начать бесплатно
+            {ctaLabel}
           </button>
           {/* [ОТКЛ №1] Реальные числа: 84 вопроса и 22 задачи (в мокапе 156/24). */}
           <div className="text-[12px] text-[#7C7871]">

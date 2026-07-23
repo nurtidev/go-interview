@@ -25,7 +25,7 @@ function App() {
           <Toaster richColors position="top-center" />
           <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route path="/register" element={<RegisterPage />} />
+          <Route path="/register" element={<RegisterRoute />} />
 
           {/* Публичный корень: гость → лендинг (вне Layout); авторизован → Dashboard в Layout. */}
           <Route path="/" element={<HomeRoute />} />
@@ -49,6 +49,16 @@ function App() {
       </BrowserRouter>
     </ThemeProvider>
   )
+}
+
+// /register: когда самостоятельная регистрация закрыта на этом инстансе,
+// маршрут ведёт на /login с ненавязчивой подписью вместо формы регистрации.
+function RegisterRoute() {
+  const { registrationEnabled } = useAuth()
+  if (!registrationEnabled) {
+    return <Navigate to="/login" replace state={{ notice: 'Регистрация закрыта' }} />
+  }
+  return <RegisterPage />
 }
 
 // Корневой маршрут «/»: без токена — публичный лендинг; с токеном — существующая

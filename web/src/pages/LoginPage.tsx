@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -7,8 +7,10 @@ import { ApiError } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 
 export default function LoginPage() {
-  const { login } = useAuth()
+  const { login, registrationEnabled } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  const notice = (location.state as { notice?: string } | null)?.notice ?? null
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -44,6 +46,7 @@ export default function LoginPage() {
           <p className="text-center text-[13.5px] leading-relaxed text-ink-2">
             Спортзал для собеседований Senior Go
           </p>
+          {notice && <p className="text-center text-[12px] text-ink-3">{notice}</p>}
         </div>
 
         <form className="flex flex-col gap-3" onSubmit={handleSubmit}>
@@ -79,12 +82,14 @@ export default function LoginPage() {
           </Button>
         </form>
 
-        <p className="text-center text-[12.5px] text-ink-2">
-          Нет аккаунта?{' '}
-          <Link to="/register" className="font-medium text-ink transition-colors hover:text-accent-hover">
-            Зарегистрироваться
-          </Link>
-        </p>
+        {registrationEnabled && (
+          <p className="text-center text-[12.5px] text-ink-2">
+            Нет аккаунта?{' '}
+            <Link to="/register" className="font-medium text-ink transition-colors hover:text-accent-hover">
+              Зарегистрироваться
+            </Link>
+          </p>
+        )}
       </div>
     </div>
   )

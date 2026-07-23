@@ -18,8 +18,17 @@ import (
 
 // newTestServer boots a Server backed by a throwaway on-disk SQLite database
 // with a nil runner: none of the endpoints exercised in this file (giveup,
-// solution, solved, tasks, stats) touch the Go code runner.
+// solution, solved, tasks, stats) touch the Go code runner. Registration is
+// enabled, matching the default production behavior.
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store, *auth.Service) {
+	t.Helper()
+	return newTestServerWithConfig(t, true)
+}
+
+// newTestServerWithConfig is like newTestServer but lets callers pick the
+// registration_enabled flag, for tests that exercise the closed-registration
+// path (POST /api/auth/register and GET /api/config).
+func newTestServerWithConfig(t *testing.T, registrationEnabled bool) (*httptest.Server, *store.Store, *auth.Service) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -29,7 +38,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store, *auth.Service)
 
 	authSvc := auth.New("test-secret")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := NewServer(st, authSvc, nil, "", logger)
+	srv := NewServer(st, authSvc, nil, "", registrationEnabled, logger)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts, st, authSvc

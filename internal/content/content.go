@@ -81,7 +81,9 @@ func Load(dir string, logger *slog.Logger) ([]Question, error) {
 			// Livecoding tasks and lessons live under content/livecoding and
 			// content/lessons and are loaded separately by LoadCoding and
 			// LoadLessons; skip them here to avoid false warnings.
-			if d.Name() == "livecoding" || d.Name() == "lessons" {
+			// _private holds the local-only trainer layer (gitignored, never
+			// deployed); it is loaded explicitly, not as public questions.
+			if d.Name() == "livecoding" || d.Name() == "lessons" || d.Name() == "_private" {
 				return filepath.SkipDir
 			}
 			return nil

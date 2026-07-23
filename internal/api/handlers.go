@@ -31,6 +31,11 @@ type authRequest struct {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if !s.registrationEnabled {
+		writeError(w, http.StatusForbidden, "registration is closed")
+		return
+	}
+
 	var req authRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")

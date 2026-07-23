@@ -14,19 +14,21 @@ import (
 
 // Server holds the handler dependencies.
 type Server struct {
-	store   *store.Store
-	auth    *auth.Service
-	runner  *runner.Runner
-	webDist string
-	logger  *slog.Logger
+	store               *store.Store
+	auth                *auth.Service
+	runner              *runner.Runner
+	webDist             string
+	registrationEnabled bool
+	logger              *slog.Logger
 }
 
-// NewServer builds a Server.
-func NewServer(st *store.Store, a *auth.Service, run *runner.Runner, webDist string, logger *slog.Logger) *Server {
+// NewServer builds a Server. registrationEnabled gates POST /api/auth/register
+// and is reported (never any other secret) via the public GET /api/config.
+func NewServer(st *store.Store, a *auth.Service, run *runner.Runner, webDist string, registrationEnabled bool, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{store: st, auth: a, runner: run, webDist: webDist, logger: logger}
+	return &Server{store: st, auth: a, runner: run, webDist: webDist, registrationEnabled: registrationEnabled, logger: logger}
 }
 
 // Handler returns the fully configured http.Handler for the service.
@@ -35,6 +37,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Public endpoints.
 	mux.HandleFunc("GET /api/healthz", s.handleHealthz)
+	mux.HandleFunc("GET /api/config", s.handleConfig)
 	mux.HandleFunc("POST /api/auth/register", s.handleRegister)
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 
@@ -76,6 +79,13 @@ func (s *Server) protected(h http.HandlerFunc) http.Handler {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleConfig exposes the minimal set of public, non-secret runtime flags the
+// frontend needs before authentication (e.g. whether self-registration is
+// open on this instance). Never add anything sensitive to this response.
+func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"registration_enabled": s.registrationEnabled})
 }
 
 func (s *Server) handleAPINotFound(w http.ResponseWriter, _ *http.Request) {

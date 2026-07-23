@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,23 +27,30 @@ const maxConcurrentRuns = 2
 const defaultJWTSecret = "dev-secret-change-me"
 
 type config struct {
-	Port       string
-	DBPath     string
-	JWTSecret  string
-	ContentDir string
-	WebDist    string
+	Port                string
+	DBPath              string
+	JWTSecret           string
+	ContentDir          string
+	WebDist             string
+	RegistrationEnabled bool
+	SeedUsers           string
 }
 
 func loadConfig(logger *slog.Logger) config {
 	cfg := config{
-		Port:       env("PORT", "8080"),
-		DBPath:     env("DB_PATH", "./data/app.db"),
-		JWTSecret:  env("JWT_SECRET", defaultJWTSecret),
-		ContentDir: env("CONTENT_DIR", "./content"),
-		WebDist:    env("WEB_DIST", "./web/dist"),
+		Port:                env("PORT", "8080"),
+		DBPath:              env("DB_PATH", "./data/app.db"),
+		JWTSecret:           env("JWT_SECRET", defaultJWTSecret),
+		ContentDir:          env("CONTENT_DIR", "./content"),
+		WebDist:             env("WEB_DIST", "./web/dist"),
+		RegistrationEnabled: envBool("REGISTRATION_ENABLED", true),
+		SeedUsers:           env("SEED_USERS", ""),
 	}
 	if cfg.JWTSecret == defaultJWTSecret {
 		logger.Warn("JWT_SECRET is using the insecure default; set JWT_SECRET in production")
+	}
+	if !cfg.RegistrationEnabled {
+		logger.Info("self-registration is disabled (REGISTRATION_ENABLED); provisioning accounts via SEED_USERS")
 	}
 	return cfg
 }
@@ -52,6 +60,23 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool parses a boolean env var. Unset or empty falls back to def. The
+// values "false", "0" and "no" (case-insensitive, surrounding whitespace
+// ignored) are treated as false; anything else present is treated as true.
+// This is deliberately permissive so that e.g. "True" or "1" also mean true.
+func envBool(key string, def bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "false", "0", "no":
+		return false
+	default:
+		return true
+	}
 }
 
 func main() {
@@ -74,6 +99,8 @@ func main() {
 	}
 	defer st.Close()
 
+	seedUsers(context.Background(), st, cfg.SeedUsers, logger)
+
 	loadContent(context.Background(), st, cfg.ContentDir, logger)
 
 	codeRunner, err := runner.New(maxConcurrentRuns)
@@ -83,7 +110,7 @@ func main() {
 	}
 
 	authSvc := auth.New(cfg.JWTSecret)
-	srv := api.NewServer(st, authSvc, codeRunner, cfg.WebDist, logger)
+	srv := api.NewServer(st, authSvc, codeRunner, cfg.WebDist, cfg.RegistrationEnabled, logger)
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -111,6 +138,70 @@ func main() {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
 	logger.Info("server stopped")
+}
+
+// seedUsers provisions accounts from the SEED_USERS env var for closed
+// instances (REGISTRATION_ENABLED=false) that still need a way to create
+// accounts. spec is a semicolon-separated list of "email:password" pairs
+// (the password itself may contain further colons; only the first colon in
+// each pair is treated as the separator, so only ';' is off-limits). Every
+// email already present in the store is left untouched — passwords are never
+// overwritten. An empty spec is a no-op. Failures for individual entries are
+// logged and skipped rather than aborting the whole batch; passwords are
+// never logged.
+func seedUsers(ctx context.Context, st *store.Store, spec string, logger *slog.Logger) {
+	if strings.TrimSpace(spec) == "" {
+		return
+	}
+
+	var created, skipped, failed int
+	for _, pair := range strings.Split(spec, ";") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		idx := strings.IndexByte(pair, ':')
+		if idx <= 0 || idx == len(pair)-1 {
+			logger.Warn("seed_users: malformed entry (want email:password), skipping")
+			failed++
+			continue
+		}
+		email := strings.TrimSpace(strings.ToLower(pair[:idx]))
+		password := pair[idx+1:]
+
+		_, err := st.GetUserByEmail(ctx, email)
+		if err == nil {
+			// Account already exists: never touch its password.
+			skipped++
+			continue
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			logger.Error("seed_users: lookup failed", "email", email, "error", err)
+			failed++
+			continue
+		}
+
+		hash, err := auth.HashPassword(password)
+		if err != nil {
+			logger.Error("seed_users: hash password failed", "email", email, "error", err)
+			failed++
+			continue
+		}
+		if _, err := st.CreateUser(ctx, email, hash); err != nil {
+			if errors.Is(err, store.ErrEmailTaken) {
+				// Lost a race against another creation path; leave it alone.
+				skipped++
+				continue
+			}
+			logger.Error("seed_users: create user failed", "email", email, "error", err)
+			failed++
+			continue
+		}
+		created++
+	}
+
+	logger.Info("seed_users provisioning complete", "created", created, "skipped", skipped, "failed", failed)
 }
 
 // loadContent parses the content directory and upserts every valid question

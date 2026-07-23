@@ -13,6 +13,8 @@ import {
 interface AuthContextValue {
   user: User | null
   isAuthenticated: boolean
+  /** Открыта ли самостоятельная регистрация на этом инстансе (GET /api/config). */
+  registrationEnabled: boolean
   login: (email: string, password: string) => Promise<void>
   register: (email: string, password: string) => Promise<void>
   logout: () => void
@@ -22,6 +24,9 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => getStoredUser())
+  // По умолчанию считаем регистрацию открытой: так ведёт себя приложение, пока
+  // /api/config не ответил (или недоступен) — деградация без изменений.
+  const [registrationEnabled, setRegistrationEnabled] = useState(true)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -32,6 +37,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.addEventListener(AUTH_EXPIRED_EVENT, handleExpired)
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleExpired)
   }, [navigate])
+
+  useEffect(() => {
+    let cancelled = false
+    api
+      .getConfig()
+      .then((cfg) => {
+        if (!cancelled) setRegistrationEnabled(cfg.registration_enabled)
+      })
+      .catch(() => {
+        // /api/config недоступен — оставляем значение по умолчанию (true).
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   async function login(email: string, password: string) {
     const res = await api.login(email, password)
@@ -54,6 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value: AuthContextValue = {
     user,
     isAuthenticated: Boolean(user && getToken()),
+    registrationEnabled,
     login,
     register,
     logout,
