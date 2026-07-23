@@ -1,0 +1,224 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: merge-cancelable
+kind: go
+title: "Fan-in с отменой по context (без утечек)"
+difficulty: staff
+tags: [concurrency, channels, context]
+statement_md: |
+  Реализуйте `Merge` — fan-in, сливающий значения из нескольких входных каналов
+  в один выходной, с поддержкой отмены через `context.Context`.
+
+  ```go
+  func Merge(ctx context.Context, chs ...<-chan int) <-chan int
+  ```
+
+  Дано: контекст `ctx` и произвольное число входных каналов. Верните выходной
+  канал со всеми значениями входов (порядок не важен, ничего не теряется и не
+  дублируется).
+
+  Требования:
+
+  - Выходной канал закрывается, когда закрыты **все** входы **или** отменён
+    `ctx` — иначе потребитель на `for v := range out` зависнет.
+  - Отмена работает, даже если пересылающая горутина заблокирована на отправке в
+    выход (значения больше никто не читает). Горутины **не должны утекать** ни при
+    нормальном завершении, ни при отмене.
+  - `Merge()` без входных каналов возвращает немедленно закрытый канал.
+
+  Проверяется под `-race` и на отсутствие утечки горутин.
+starter_code: |
+  package main
+
+  import "context"
+
+  // Merge выполняет fan-in: сливает значения из всех входных каналов в один
+  // выходной. При отмене ctx перестаёт пересылать значения. Выходной канал
+  // закрывается, когда закрыты все входы ИЛИ отменён ctx. Горутины не должны
+  // утекать ни в одном из случаев.
+  func Merge(ctx context.Context, chs ...<-chan int) <-chan int {
+      // TODO
+      return nil
+  }
+hints:
+  - "На каждый входной канал — своя пересылающая горутина (чтение из входов параллельно). Закрыть выход должна ровно одна сторона и ровно один раз, только когда все пересылающие горутины завершились — синхронизация через `sync.WaitGroup` + отдельная горутина-закрыватель (`wg.Wait(); close(out)`)."
+  - "Каждая пересылающая горутина в цикле через `select` и принимает из своего входа, и следит за `ctx.Done()`. При закрытии входа (`ok == false`) — выход из горутины."
+  - "Опасность утечки — на ОТПРАВКЕ в out: оберните её вложенным `select { case out <- v: case <-ctx.Done(): return }`. Иначе при отмене, когда out никто не читает, горутина зависнет на `out <- v` (leaked goroutine внутри select)."
+solution_md: |
+  ### Идея
+
+  Классический fan-in: на каждый входной канал — своя горутина, пересылающая его
+  значения в общий `out`. Закрытие `out` доверяем отдельной горутине-закрывателю
+  через `sync.WaitGroup`: счётчик равен числу входов, каждая пересылающая
+  горутина по завершении делает `Done`, закрыватель ждёт всех и делает
+  `close(out)` — ровно один раз.
+
+  Отмена по контексту добавляет две тонкости:
+
+  1. Приём из входа оборачиваем в `select` с веткой `<-ctx.Done()`, чтобы горутина
+     не зависла на пустом входе после отмены.
+  2. **Отправку** в `out` тоже оборачиваем вложенным `select` с `<-ctx.Done()` —
+     иначе при отмене, когда потребитель перестал читать, горутина навсегда
+     зависнет на `out <- v` (та самая утечка «внутри select»).
+
+  При обоих способах завершения (все входы закрыты или отмена) все пересылающие
+  горутины выходят, счётчик обнуляется, закрыватель закрывает `out`. Для
+  `Merge()` без входов `WaitGroup` пуст — закрыватель закрывает `out` сразу.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import (
+      "context"
+      "sync"
+  )
+
+  func Merge(ctx context.Context, chs ...<-chan int) <-chan int {
+      out := make(chan int)
+      var wg sync.WaitGroup
+      wg.Add(len(chs))
+      for _, ch := range chs {
+          go func(c <-chan int) {
+              defer wg.Done()
+              for {
+                  select {
+                  case v, ok := <-c:
+                      if !ok {
+                          return // вход закрыт
+                      }
+                      select {
+                      case out <- v:
+                      case <-ctx.Done():
+                          return // отмена во время отправки — не зависаем
+                      }
+                  case <-ctx.Done():
+                      return // отмена во время ожидания входа
+                  }
+              }
+          }(ch)
+      }
+      go func() {
+          wg.Wait()
+          close(out)
+      }()
+      return out
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Отправлять `out <- v` без вложенного `select` — утечка горутины при отмене, когда out никто не читает (`-race` её не покажет).
+  - Закрыть `out` внутри пересылающей горутины — другая ещё пишет, паника «send on closed channel».
+  - Закрыть `out` без ожидания всех горутин — потеря значений или паника отправки в закрытый канал.
+  - Захватить переменную цикла `ch` без передачи параметром — на Go ≤ 1.21 все горутины читают последний канал.
+time_limit_sec: 20
+race: true
+test_code: |
+  package main
+
+  import (
+      "context"
+      "runtime"
+      "testing"
+      "time"
+  )
+
+  func genVals(vals ...int) <-chan int {
+      c := make(chan int)
+      go func() {
+          defer close(c)
+          for _, v := range vals {
+              c <- v
+          }
+      }()
+      return c
+  }
+
+  func genForever(ctx context.Context, start int) <-chan int {
+      c := make(chan int)
+      go func() {
+          defer close(c)
+          for i := start; ; i++ {
+              select {
+              case c <- i:
+              case <-ctx.Done():
+                  return
+              }
+          }
+      }()
+      return c
+  }
+
+  func TestMergeCollectsAllNoCancel(t *testing.T) {
+      out := Merge(context.Background(), genVals(1, 2, 3), genVals(4, 5), genVals(6, 7, 8, 9))
+      got := map[int]int{}
+      done := make(chan struct{})
+      go func() {
+          for v := range out {
+              got[v]++
+          }
+          close(done)
+      }()
+      select {
+      case <-done:
+      case <-time.After(2 * time.Second):
+          t.Fatal("выходной канал не закрылся после исчерпания входов")
+      }
+      for _, v := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9} {
+          if got[v] != 1 {
+              t.Fatalf("значение %d получено %d раз, want 1 (%v)", v, got[v], got)
+          }
+      }
+      if len(got) != 9 {
+          t.Fatalf("получено %d различных значений, want 9", len(got))
+      }
+  }
+
+  func TestMergeEmptyClosed(t *testing.T) {
+      out := Merge(context.Background())
+      select {
+      case _, ok := <-out:
+          if ok {
+              t.Fatal("Merge() без входов должен вернуть закрытый канал")
+          }
+      case <-time.After(time.Second):
+          t.Fatal("Merge() без входов не закрыл выход")
+      }
+  }
+
+  func TestMergeCancelNoLeak(t *testing.T) {
+      base := runtime.NumGoroutine()
+      ctx, cancel := context.WithCancel(context.Background())
+      out := Merge(ctx, genForever(ctx, 0), genForever(ctx, 1000), genForever(ctx, 2000))
+
+      for i := 0; i < 5; i++ {
+          <-out
+      }
+      time.Sleep(10 * time.Millisecond)
+      cancel() // отмена, пока пересылающие горутины, вероятно, блокированы на отправке
+
+      drained := make(chan struct{})
+      go func() {
+          for range out {
+          }
+          close(drained)
+      }()
+      select {
+      case <-drained:
+      case <-time.After(2 * time.Second):
+          t.Fatal("выходной канал не закрылся после отмены ctx (утечка горутин в select)")
+      }
+
+      ok := false
+      for i := 0; i < 200; i++ {
+          if runtime.NumGoroutine() <= base {
+              ok = true
+              break
+          }
+          time.Sleep(10 * time.Millisecond)
+      }
+      if !ok {
+          t.Fatalf("горутины не завершились после отмены: было %d, стало %d", base, runtime.NumGoroutine())
+      }
+  }

@@ -31,6 +31,7 @@ type config struct {
 	DBPath              string
 	JWTSecret           string
 	ContentDir          string
+	PrivateContentDir   string
 	WebDist             string
 	RegistrationEnabled bool
 	SeedUsers           string
@@ -38,10 +39,18 @@ type config struct {
 
 func loadConfig(logger *slog.Logger) config {
 	cfg := config{
-		Port:                env("PORT", "8080"),
-		DBPath:              env("DB_PATH", "./data/app.db"),
-		JWTSecret:           env("JWT_SECRET", defaultJWTSecret),
-		ContentDir:          env("CONTENT_DIR", "./content"),
+		Port:       env("PORT", "8080"),
+		DBPath:     env("DB_PATH", "./data/app.db"),
+		JWTSecret:  env("JWT_SECRET", defaultJWTSecret),
+		ContentDir: env("CONTENT_DIR", "./content"),
+		// PrivateContentDir enables an optional, additional content layer
+		// (private questions/livecoding tasks/lessons) on top of ContentDir.
+		// Empty by default: unset on the public build, so the public
+		// instance never loads it. Set only on the private instance, e.g.
+		// to /app/content-private (see content-private/README.md and the
+		// Dockerfile, which bakes that directory into every image but never
+		// sets this variable).
+		PrivateContentDir:   env("PRIVATE_CONTENT_DIR", ""),
 		WebDist:             env("WEB_DIST", "./web/dist"),
 		RegistrationEnabled: envBool("REGISTRATION_ENABLED", true),
 		SeedUsers:           env("SEED_USERS", ""),
@@ -102,6 +111,7 @@ func main() {
 	seedUsers(context.Background(), st, cfg.SeedUsers, logger)
 
 	loadContent(context.Background(), st, cfg.ContentDir, logger)
+	loadPrivateContent(context.Background(), st, cfg.PrivateContentDir, logger)
 
 	codeRunner, err := runner.New(maxConcurrentRuns)
 	if err != nil {
@@ -122,7 +132,7 @@ func main() {
 	defer stop()
 
 	go func() {
-		logger.Info("server listening", "addr", httpServer.Addr, "web_dist", cfg.WebDist, "content_dir", cfg.ContentDir)
+		logger.Info("server listening", "addr", httpServer.Addr, "web_dist", cfg.WebDist, "content_dir", cfg.ContentDir, "private_content_dir", cfg.PrivateContentDir)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server error", "error", err)
 			stop()
@@ -225,6 +235,26 @@ func loadContent(ctx context.Context, st *store.Store, dir string, logger *slog.
 
 	loadCoding(ctx, st, filepath.Join(dir, "livecoding"), logger)
 	loadLessons(ctx, st, filepath.Join(dir, "lessons"), logger)
+}
+
+// loadPrivateContent optionally loads a second, private content layer on top
+// of the public one, controlled by PRIVATE_CONTENT_DIR. When dir is empty or
+// does not exist, this is a silent no-op and the server behaves exactly as it
+// did before this feature existed: nothing is loaded and nothing is logged.
+// When the directory exists, it is loaded with the exact same code path as
+// CONTENT_DIR (loadContent, which itself runs content.Load plus the
+// livecoding/lessons sub-loaders) and upserted into the same tables, so
+// private questions/tasks/lessons are added alongside the public ones.
+func loadPrivateContent(ctx context.Context, st *store.Store, dir string, logger *slog.Logger) {
+	if dir == "" {
+		return
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return
+	}
+	logger.Info("private content layer enabled", "dir", dir)
+	loadContent(ctx, st, dir, logger)
 }
 
 // loadCoding parses the livecoding subdirectory and upserts every valid task.

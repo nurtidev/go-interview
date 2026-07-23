@@ -1,0 +1,210 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: unbounded-queue
+kind: go
+title: "Блокирующая очередь без ограничения размера"
+difficulty: staff
+tags: [concurrency, sync, cond]
+statement_md: |
+  Реализуйте потокобезопасную FIFO-очередь **без ограничения размера**.
+
+  ```go
+  func NewQueue() *Queue
+  func (q *Queue) Put(v int)  // добавить элемент (никогда не блокирует)
+  func (q *Queue) Get() int   // извлечь элемент; блокирует, если очередь пуста
+  ```
+
+  Дано: очередь должна расти без ограничений (в отличие от буферизованного
+  канала фиксированной ёмкости). `Put` кладёт элемент в конец и не блокирует
+  никогда. `Get` возвращает элемент с начала (FIFO); если очередь пуста —
+  **блокирует** вызывающую горутину, пока элемент не появится (без busy-waiting).
+
+  Методы вызываются из разных горутин конкурентно.
+
+  Требования: без гонок (`-race`), без busy-waiting, без потерь и дублирования
+  элементов при конкуренции.
+starter_code: |
+  package main
+
+  import "sync"
+
+  // Queue — потокобезопасная FIFO-очередь без ограничения размера.
+  // Get блокируется, пока в очереди не появится элемент (без busy-waiting).
+  type Queue struct {
+      mu sync.Mutex
+      // TODO: слайс элементов + примитив ожидания (sync.Cond)
+  }
+
+  func NewQueue() *Queue {
+      // TODO
+      return &Queue{}
+  }
+
+  // Put добавляет элемент в конец очереди.
+  func (q *Queue) Put(v int) {
+      // TODO
+  }
+
+  // Get извлекает элемент с начала очереди, блокируясь, если она пуста.
+  func (q *Queue) Get() int {
+      // TODO
+      return 0
+  }
+hints:
+  - "Канал фиксированной ёмкости не годится — нужен неограниченный рост. Храните элементы в слайсе под `sync.Mutex`, а `Put` делает `append`."
+  - "Блокировать `Get` на пустой очереди без busy-waiting умеет `sync.Cond` — условная переменная, специально для «ждать, пока условие не станет истинным». Создайте её через `sync.NewCond(&q.mu)`."
+  - "`Get`: под `Lock` цикл `for len(items) == 0 { cond.Wait() }`, затем снять первый элемент (`items[0]`, `items = items[1:]`). `Put` после `append` вызывает `cond.Signal()`, чтобы разбудить одного ждущего. Ждать в `for`, а не `if` — против ложных пробуждений."
+solution_md: |
+  ### Идея
+
+  Неограниченный рост исключает канал фиксированной ёмкости — храним элементы в
+  слайсе под `sync.Mutex`, `Put` просто делает `append` (никогда не блокирует).
+
+  Заблокировать `Get` на пустой очереди без busy-waiting позволяет `sync.Cond` —
+  условная переменная, связанная с тем же мьютексом. `Get` под `Lock` в цикле
+  `for len(items) == 0 { cond.Wait() }` засыпает (Wait атомарно отпускает мьютекс
+  и блокирует горутину, а при пробуждении снова берёт мьютекс). `Put` после
+  добавления вызывает `cond.Signal()`, будя одного ждущего.
+
+  Проверять условие нужно в `for`, а не `if`: горутина может проснуться, но
+  элемент успеет забрать другой потребитель (ложное/конкурентное пробуждение) —
+  тогда снова уходим в `Wait`.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  type Queue struct {
+      mu    sync.Mutex
+      cond  *sync.Cond
+      items []int
+  }
+
+  func NewQueue() *Queue {
+      q := &Queue{}
+      q.cond = sync.NewCond(&q.mu)
+      return q
+  }
+
+  func (q *Queue) Put(v int) {
+      q.mu.Lock()
+      q.items = append(q.items, v)
+      q.mu.Unlock()
+      q.cond.Signal() // будим одного ждущего в Get
+  }
+
+  func (q *Queue) Get() int {
+      q.mu.Lock()
+      defer q.mu.Unlock()
+      for len(q.items) == 0 {
+          q.cond.Wait() // отпускает мьютекс и блокирует, пока не появится элемент
+      }
+      v := q.items[0]
+      q.items = q.items[1:]
+      return v
+  }
+  ```
+
+  Сложность: `Put` — амортизированно `O(1)`; `Get` — `O(1)` на снятие головы.
+
+  ### Типичные ошибки на интервью
+
+  - `if len(items) == 0 { cond.Wait() }` вместо `for` — при конкурентном заборе элемент могут увести, и вы прочитаете из пустого слайса (паника index out of range).
+  - Busy-waiting `for len(items) == 0 {}` без Cond — грузит ядро на 100%.
+  - Вызвать `cond.Wait()` не под тем же мьютексом, что у Cond — паника рантайма.
+  - `cond.Signal()` под удержанным мьютексом не ошибка, но помните: разбуженная горутина всё равно ждёт освобождения мьютекса.
+time_limit_sec: 18
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestQueueFIFOSingleGoroutine(t *testing.T) {
+      q := NewQueue()
+      for i := 0; i < 5; i++ {
+          q.Put(i)
+      }
+      for i := 0; i < 5; i++ {
+          if got := q.Get(); got != i {
+              t.Fatalf("Get() = %d, want %d (нарушен FIFO)", got, i)
+          }
+      }
+  }
+
+  func TestQueueGetBlocksUntilPut(t *testing.T) {
+      q := NewQueue()
+      got := make(chan int, 1)
+      go func() { got <- q.Get() }()
+      select {
+      case <-got:
+          t.Fatal("Get() вернулся на пустой очереди, а должен был заблокироваться")
+      case <-time.After(50 * time.Millisecond):
+      }
+      q.Put(99)
+      select {
+      case v := <-got:
+          if v != 99 {
+              t.Fatalf("Get() = %d, want 99", v)
+          }
+      case <-time.After(time.Second):
+          t.Fatal("Get() не разблокировался после Put()")
+      }
+  }
+
+  func TestQueueConcurrent(t *testing.T) {
+      q := NewQueue()
+      const (
+          producers = 5
+          perP      = 2000
+          total     = producers * perP
+      )
+      var pw sync.WaitGroup
+      pw.Add(producers)
+      for p := 0; p < producers; p++ {
+          go func(p int) {
+              defer pw.Done()
+              for i := 0; i < perP; i++ {
+                  q.Put(p*1_000_000 + i)
+              }
+          }(p)
+      }
+
+      var taken int32
+      var sum int64
+      var cw sync.WaitGroup
+      const consumers = 5
+      cw.Add(consumers)
+      for c := 0; c < consumers; c++ {
+          go func() {
+              defer cw.Done()
+              for {
+                  if atomic.AddInt32(&taken, 1) > total {
+                      return // ровно total вызовов Get суммарно — без блокировки навсегда
+                  }
+                  v := q.Get()
+                  atomic.AddInt64(&sum, int64(v))
+              }
+          }()
+      }
+
+      pw.Wait()
+      cw.Wait()
+
+      var want int64
+      for p := 0; p < producers; p++ {
+          for i := 0; i < perP; i++ {
+              want += int64(p*1_000_000 + i)
+          }
+      }
+      if sum != want {
+          t.Fatalf("сумма извлечённых = %d, want %d (потеря/дублирование элементов)", sum, want)
+      }
+  }

@@ -246,12 +246,19 @@ func (s *Server) handleSections(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]sectionResp, 0, len(Sections))
 	for _, sec := range Sections {
+		total := totals[sec.ID]
+		// A section with no questions at all (e.g. "private" when no
+		// private content layer is loaded) is omitted from the catalog
+		// rather than shown as an empty, unusable entry.
+		if total == 0 {
+			continue
+		}
 		p := progress[sec.ID]
 		out = append(out, sectionResp{
 			ID:          sec.ID,
 			Title:       sec.Title,
 			Description: sec.Description,
-			Total:       totals[sec.ID],
+			Total:       total,
 			Done:        p.Done,
 			Due:         p.Due,
 		})

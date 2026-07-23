@@ -44,4 +44,9 @@ var Sections = []SectionInfo{
 		Title:       "ОС и Linux",
 		Description: "Процессы и память ОС, epoll, cgroups — фундамент под рантайм Go и контейнеры.",
 	},
+	{
+		ID:          "private",
+		Title:       "Приватный тренажёр",
+		Description: "Личные задачи и вопросы.",
+	},
 }

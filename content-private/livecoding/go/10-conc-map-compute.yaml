@@ -1,0 +1,177 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: conc-map-compute
+kind: go
+title: "Конкурентная карта: SetIfAbsent и Compute"
+difficulty: senior
+tags: [concurrency, mutex, generics]
+statement_md: |
+  Дана потокобезопасная обобщённая карта `ConcMap` с `Get`. Добавьте два метода,
+  выполняющих **составную операцию атомарно** (проверку и изменение под одной
+  блокировкой).
+
+  ```go
+  func (m *ConcMap[K, V]) SetIfAbsent(key K, val V) V
+  func (m *ConcMap[K, V]) Compute(key K, fn func(V) V)
+  ```
+
+  - `SetIfAbsent` кладёт `val` по ключу, только если ключа ещё нет, и возвращает
+    **актуальное** значение: если ключ уже был — старое; если не было — только
+    что вставленное. При конкурентной вставке одного ключа «побеждает» ровно
+    один, и все вызовы возвращают значение победителя.
+  - `Compute` заменяет значение по ключу результатом `fn(текущее значение)`.
+    `fn` должна примениться атомарно: параллельные `Compute("k", +1)` из двух
+    горутин по 100 раз каждая дают итог 200 (ничего не теряется).
+
+  Требования: без гонок и без потерянных обновлений (проверяется под `-race`).
+starter_code: |
+  package main
+
+  import "sync"
+
+  // ConcMap — потокобезопасная обобщённая карта.
+  type ConcMap[K comparable, V any] struct {
+      mu    sync.Mutex
+      items map[K]V
+  }
+
+  func NewConcMap[K comparable, V any]() *ConcMap[K, V] {
+      return &ConcMap[K, V]{items: make(map[K]V)}
+  }
+
+  func (m *ConcMap[K, V]) Get(key K) V {
+      m.mu.Lock()
+      defer m.mu.Unlock()
+      return m.items[key]
+  }
+
+  // SetIfAbsent кладёт val по ключу, только если ключа ещё нет,
+  // и возвращает актуальное значение (существующее либо только что вставленное).
+  func (m *ConcMap[K, V]) SetIfAbsent(key K, val V) V {
+      // TODO
+      var zero V
+      return zero
+  }
+
+  // Compute атомарно заменяет значение по ключу результатом fn(текущее значение).
+  func (m *ConcMap[K, V]) Compute(key K, fn func(V) V) {
+      // TODO
+  }
+hints:
+  - "Ошибка — делать `if !has(key) { Set(key, val) }` двумя отдельными вызовами: между проверкой и вставкой другая горутина успеет вставить своё. Проверка и вставка должны идти под ОДНИМ `Lock()`, без его отпускания между шагами."
+  - "`SetIfAbsent`: под `Lock` читаете `existing, ok := m.items[key]`; если `ok` — вернуть `existing`; иначе записать `val` и вернуть `val`."
+  - "`Compute`: под `Lock` вычислите `m.items[key] = fn(m.items[key])`. Всё выражение внутри критической секции — чтение старого, применение `fn`, запись нового — атомарно."
+solution_md: |
+  ### Идея
+
+  Оба метода — про **атомарность составной операции**. Отдельные `Get`/`Set` сами
+  по себе потокобезопасны, но последовательность «проверить, затем изменить» между
+  вызовами не атомарна: другая горутина вклинится между шагами. Поэтому и проверку,
+  и изменение выполняем под одним `Lock()`, не отпуская мьютекс посередине.
+
+  `SetIfAbsent` под блокировкой смотрит, есть ли ключ: если есть — возвращает
+  существующее значение (вставка «проиграла»); если нет — вставляет и возвращает
+  своё. `Compute` под блокировкой применяет `fn` к текущему значению и пишет
+  результат — чтение старого и запись нового неразрывны, поэтому инкременты не
+  теряются.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  type ConcMap[K comparable, V any] struct {
+      mu    sync.Mutex
+      items map[K]V
+  }
+
+  func NewConcMap[K comparable, V any]() *ConcMap[K, V] {
+      return &ConcMap[K, V]{items: make(map[K]V)}
+  }
+
+  func (m *ConcMap[K, V]) Get(key K) V {
+      m.mu.Lock()
+      defer m.mu.Unlock()
+      return m.items[key]
+  }
+
+  func (m *ConcMap[K, V]) SetIfAbsent(key K, val V) V {
+      m.mu.Lock()
+      defer m.mu.Unlock()
+      if existing, ok := m.items[key]; ok {
+          return existing
+      }
+      m.items[key] = val
+      return val
+  }
+
+  func (m *ConcMap[K, V]) Compute(key K, fn func(V) V) {
+      m.mu.Lock()
+      defer m.mu.Unlock()
+      m.items[key] = fn(m.items[key])
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Реализовать `SetIfAbsent` через `if m.Get(key) == zero { m.Set(...) }` — две отдельные блокировки, гонка «проверил-вставил», плюс путаница с нулевым значением как «ключа нет».
+  - `Compute` как `m.Set(key, fn(m.Get(key)))` — чтение и запись под разными блокировками, потерянные обновления.
+  - Вызывать `fn` вне критической секции — теряется атомарность; но помните и об обратном: долгая `fn` под мьютексом сериализует всех.
+  - Возвращать из `SetIfAbsent` всегда `val` — неверно, при существующем ключе нужно старое значение.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "testing"
+  )
+
+  func TestConcMapCompute(t *testing.T) {
+      m := NewConcMap[string, int]()
+      const (
+          goroutines = 8
+          perG       = 1000
+      )
+      var wg sync.WaitGroup
+      wg.Add(goroutines)
+      for g := 0; g < goroutines; g++ {
+          go func() {
+              defer wg.Done()
+              for i := 0; i < perG; i++ {
+                  m.Compute("k", func(v int) int { return v + 1 })
+              }
+          }()
+      }
+      wg.Wait()
+      if got := m.Get("k"); got != goroutines*perG {
+          t.Fatalf("итог Compute = %d, want %d (потеряны инкременты?)", got, goroutines*perG)
+      }
+  }
+
+  func TestConcMapSetIfAbsentFirstWins(t *testing.T) {
+      m := NewConcMap[string, int]()
+      const goroutines = 100
+      results := make([]int, goroutines)
+      var wg sync.WaitGroup
+      wg.Add(goroutines)
+      for g := 0; g < goroutines; g++ {
+          go func(g int) {
+              defer wg.Done()
+              results[g] = m.SetIfAbsent("k", g+1) // значения 1..100, все ненулевые
+          }(g)
+      }
+      wg.Wait()
+
+      winner := m.Get("k")
+      if winner == 0 {
+          t.Fatal("после SetIfAbsent значение по ключу нулевое")
+      }
+      for g := 0; g < goroutines; g++ {
+          if results[g] != winner {
+              t.Fatalf("SetIfAbsent вернул %d в горутине %d, но актуальное значение %d — победитель должен быть один", results[g], g, winner)
+          }
+      }
+  }

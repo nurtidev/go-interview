@@ -1,0 +1,173 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: semaphore-channel
+kind: go
+title: "Семафор на буферизованном канале"
+difficulty: middle
+tags: [concurrency, channels, semaphore]
+statement_md: |
+  Реализуйте **семафор** — примитив, разрешающий одновременно работать не более
+  чем `n` горутинам.
+
+  ```go
+  func NewSemaphore(n int) *Semaphore
+  func (s *Semaphore) Acquire()          // занять место; блокирует, если мест нет
+  func (s *Semaphore) Release()          // освободить ранее занятое место
+  func (s *Semaphore) TryAcquire() bool  // занять место без блокировки
+  ```
+
+  Дано: `n > 0`. `Acquire` занимает одно из `n` мест; если свободных нет —
+  блокирует вызывающую горутину, пока кто-нибудь не сделает `Release`.
+  `TryAcquire` пытается занять место, но **не блокирует**: возвращает `true`,
+  если место было и его заняли, иначе `false`.
+
+  Гарантируется: `Release` не вызывается раньше `Acquire`, число `Release` не
+  превышает число успешных `Acquire`.
+
+  Требования: без гонок (`-race`) и без busy-waiting.
+starter_code: |
+  package main
+
+  // Semaphore ограничивает число одновременно занятых мест значением n.
+  type Semaphore struct {
+      // TODO: n мест, без гонок и без busy-waiting
+  }
+
+  func NewSemaphore(n int) *Semaphore {
+      // TODO
+      return &Semaphore{}
+  }
+
+  // Acquire занимает место; блокирует, если свободных мест нет.
+  func (s *Semaphore) Acquire() {
+      // TODO
+  }
+
+  // Release освобождает ранее занятое место.
+  func (s *Semaphore) Release() {
+      // TODO
+  }
+
+  // TryAcquire пытается занять место без блокировки.
+  // Возвращает true, если удалось; false — если мест не было.
+  func (s *Semaphore) TryAcquire() bool {
+      // TODO
+      return false
+  }
+hints:
+  - "Буферизованный канал ёмкости `n` — готовый контейнер «мест». Сам канал потокобезопасен, так что ни мьютекс, ни busy-waiting не нужны."
+  - "`Acquire` кладёт токен в канал (`s.slots <- struct{}{}`) — при полном буфере отправка блокируется, пока не освободится место. `Release` забирает токен (`<-s.slots`), освобождая место следующему."
+  - "`TryAcquire` — это `Acquire` через `select` с веткой `default`: если отправка токена не проходит немедленно, `default` возвращает `false` без блокировки."
+solution_md: |
+  ### Идея
+
+  Буферизованный канал ёмкости `n` — естественный семафор: буфер и есть `n`
+  «мест». Отправка токена (`s.slots <- struct{}{}`) занимает место, а при полном
+  буфере блокируется планировщиком — ровно то, что нужно `Acquire`, и без
+  busy-waiting. Чтение токена (`<-s.slots`) освобождает место — это `Release`.
+
+  Сам канал безопасен для конкурентного доступа, поэтому дополнительная
+  синхронизация не требуется. `TryAcquire` — неблокирующая версия `Acquire`
+  через `select`+`default`: если место есть, отправка проходит немедленно и
+  возвращаем `true`; иначе срабатывает `default` и возвращаем `false`.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  type Semaphore struct {
+      slots chan struct{}
+  }
+
+  func NewSemaphore(n int) *Semaphore {
+      return &Semaphore{slots: make(chan struct{}, n)}
+  }
+
+  func (s *Semaphore) Acquire() {
+      s.slots <- struct{}{}
+  }
+
+  func (s *Semaphore) Release() {
+      <-s.slots
+  }
+
+  func (s *Semaphore) TryAcquire() bool {
+      select {
+      case s.slots <- struct{}{}:
+          return true
+      default:
+          return false
+      }
+  }
+  ```
+
+  Сложность: `O(1)` на операцию, блокировка — на канале (не busy-wait).
+
+  ### Типичные ошибки на интервью
+
+  - Счётчик `int` + `for val >= n {}` — гонка на счётчике и busy-waiting.
+  - Перепутать направление: занимать место чтением, а освобождать записью — тогда пустой семафор блокирует `Acquire` навсегда.
+  - `TryAcquire` без `default` — превращается в блокирующий `Acquire`.
+  - Мьютекс + условие вместо канала — рабочее, но лишнее; канал короче и без ручной сигнализации.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestSemaphoreLimitsConcurrency(t *testing.T) {
+      const (
+          limit = 4
+          total = 60
+      )
+      s := NewSemaphore(limit)
+      var active, peak int32
+      var wg sync.WaitGroup
+      wg.Add(total)
+      for i := 0; i < total; i++ {
+          go func() {
+              defer wg.Done()
+              s.Acquire()
+              defer s.Release()
+              n := atomic.AddInt32(&active, 1)
+              for {
+                  p := atomic.LoadInt32(&peak)
+                  if n <= p || atomic.CompareAndSwapInt32(&peak, p, n) {
+                      break
+                  }
+              }
+              time.Sleep(2 * time.Millisecond)
+              atomic.AddInt32(&active, -1)
+          }()
+      }
+      wg.Wait()
+      if peak > limit {
+          t.Fatalf("одновременно активных горутин: %d, лимит %d", peak, limit)
+      }
+      if peak < limit {
+          t.Fatalf("семафор не даёт параллелизма: пик %d, ожидали достижения %d", peak, limit)
+      }
+  }
+
+  func TestSemaphoreTryAcquire(t *testing.T) {
+      s := NewSemaphore(2)
+      if !s.TryAcquire() {
+          t.Fatal("TryAcquire на свободном семафоре должен вернуть true")
+      }
+      if !s.TryAcquire() {
+          t.Fatal("TryAcquire на втором свободном месте должен вернуть true")
+      }
+      if s.TryAcquire() {
+          t.Fatal("TryAcquire при отсутствии мест должен вернуть false")
+      }
+      s.Release()
+      if !s.TryAcquire() {
+          t.Fatal("после Release место освободилось, TryAcquire должен вернуть true")
+      }
+  }

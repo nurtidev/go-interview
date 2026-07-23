@@ -1,0 +1,153 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: sync-barrier
+kind: go
+title: "Барьер синхронизации N горутин"
+difficulty: senior
+tags: [concurrency, channels, sync]
+statement_md: |
+  Реализуйте одноразовый **барьер синхронизации** на `n` горутин.
+
+  ```go
+  func NewBarrier(n int) *Barrier
+  func (b *Barrier) Wait()
+  ```
+
+  Дано: `n > 0`. Каждая горутина, дойдя до барьера, вызывает `Wait()` и
+  блокируется. Когда `Wait()` вызвали все `n` горутин, барьер разблокирует их
+  **все разом**. Ни одна не должна пройти барьер, пока не собрались все `n`.
+
+  Требования:
+
+  - Без гонок (`-race`) и без busy-waiting.
+  - Барьер одноразовый; число горутин, работающих с ним, строго равно `n`.
+
+  Пример: 4 горутины с разным временем подготовки — быстрые ждут у барьера
+  медленных, и только после прихода четвёртой все продолжают одновременно.
+starter_code: |
+  package main
+
+  // Barrier — одноразовый барьер синхронизации на n горутин.
+  // Каждая вызвавшая Wait() горутина блокируется, пока Wait() не вызовут все n;
+  // тогда все разблокируются одновременно.
+  type Barrier struct {
+      // TODO: без гонок и без busy-waiting; ровно n касаний
+  }
+
+  func NewBarrier(n int) *Barrier {
+      // TODO
+      return &Barrier{}
+  }
+
+  // Wait отмечает прибытие горутины и блокирует её до прибытия всех n.
+  func (b *Barrier) Wait() {
+      // TODO
+  }
+hints:
+  - "Это обобщение рандеву с двух горутин на n: общий счётчик прибытий под `sync.Mutex` и канал-сигнал `release` для разблокировки без busy-waiting."
+  - "Под мьютексом инкрементируйте счётчик и вычислите, стала ли текущая горутина последней (`arrived == n`). Мьютекс отпускайте ДО ожидания на канале, иначе остальные не смогут увеличить счётчик."
+  - "Последняя (n-я) прибывшая горутина закрывает `release` — `close` разблокирует всех, кто ждёт на `<-release`, разом. Все остальные (arrived < n) блокируются на `<-release`."
+solution_md: |
+  ### Идея
+
+  Барьер — это рандеву, обобщённое с двух участников на `n`. Нужен общий счётчик
+  прибытий и способ разблокировать всех одновременно.
+
+  Счётчик `arrived` меняют все горутины — защищаем `sync.Mutex`. Под мьютексом
+  увеличиваем счётчик и запоминаем, стала ли текущая горутина последней
+  (`arrived == n`). Мьютекс отпускаем **до** ожидания на канале — иначе
+  остальные не смогут взять `Lock`, чтобы отметить своё прибытие (дедлок).
+
+  Разблокировку даёт закрытие канала `release`: последняя прибывшая горутина
+  закрывает его (и сама сразу идёт дальше), все остальные висят на `<-release` и
+  освобождаются широковещательно в момент `close`.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  type Barrier struct {
+      n       int
+      mu      sync.Mutex
+      arrived int
+      release chan struct{}
+  }
+
+  func NewBarrier(n int) *Barrier {
+      return &Barrier{n: n, release: make(chan struct{})}
+  }
+
+  func (b *Barrier) Wait() {
+      b.mu.Lock()
+      b.arrived++
+      last := b.arrived == b.n
+      b.mu.Unlock()
+
+      if last {
+          close(b.release) // разблокирует все n-1 ожидающих разом
+          return
+      }
+      <-b.release
+  }
+  ```
+
+  Сложность: `O(1)` на вызов, блокировка отдаётся планировщику.
+
+  ### Типичные ошибки на интервью
+
+  - `for b.val < b.n {}` — busy-waiting плюс гонка на счётчике.
+  - Ожидать на канале под удержанным мьютексом — дедлок: следующая горутина не возьмёт `Lock`.
+  - Использовать `send` вместо `close` — придётся вручную отправить n-1 сигналов; `close` разблокирует всех одной операцией.
+  - Пытаться переиспользовать одноразовый барьер (второй раунд) — счётчик и закрытый канал уже «отработаны»; для цикличного барьера нужна отдельная логика сброса.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestBarrierReleasesAllTogether(t *testing.T) {
+      const n = 8
+      b := NewBarrier(n)
+      var reached int32
+      var passed int32
+      errCh := make(chan string, n)
+
+      var wg sync.WaitGroup
+      wg.Add(n)
+      for i := 0; i < n; i++ {
+          go func(i int) {
+              defer wg.Done()
+              time.Sleep(time.Duration(i) * 3 * time.Millisecond) // приходят вразнобой
+              atomic.AddInt32(&reached, 1)
+              b.Wait()
+              // после барьера все n обязаны были дойти до него
+              if atomic.LoadInt32(&reached) != n {
+                  errCh <- "горутина прошла барьер, пока собрались не все"
+              }
+              atomic.AddInt32(&passed, 1)
+          }(i)
+      }
+
+      done := make(chan struct{})
+      go func() { wg.Wait(); close(done) }()
+      select {
+      case <-done:
+      case <-time.After(3 * time.Second):
+          t.Fatal("барьер завис: Wait() не разблокировался")
+      }
+      close(errCh)
+      for msg := range errCh {
+          t.Fatal(msg)
+      }
+      if passed != n {
+          t.Fatalf("прошло барьер %d горутин, want %d", passed, n)
+      }
+  }

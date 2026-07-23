@@ -1,0 +1,155 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: with-timeout-context
+kind: go
+title: "Таймаут-обёртка операции через context"
+difficulty: senior
+tags: [concurrency, context, timeout]
+statement_md: |
+  Реализуйте обобщённую обёртку `WithTimeout`, которая выполняет функцию и
+  возвращает её результат, но не ждёт дольше, чем разрешает `context.Context`.
+
+  ```go
+  func WithTimeout[T any](ctx context.Context, fn func() T) (T, error)
+  ```
+
+  Дано: контекст `ctx` (обычно с таймаутом/отменой) и функция `fn`.
+
+  - Если `fn` успела вернуть результат до завершения `ctx` — верните
+    `(результат, nil)`.
+  - Если `ctx` завершился раньше (`ctx.Done()` сработал) — верните нулевое
+    значение `T` и `ctx.Err()` (`context.DeadlineExceeded` или
+    `context.Canceled`).
+
+  Требования:
+
+  - Ожидание результата и ожидание `ctx.Done()` — конкурентно, через `select`.
+  - Горутина, исполняющая `fn`, не должна намертво блокировать выдачу результата
+    (подумайте о ёмкости канала). Проверяется под `-race`.
+starter_code: |
+  package main
+
+  import "context"
+
+  // WithTimeout выполняет fn в отдельной горутине и возвращает её результат.
+  // Если ctx завершится (таймаут/отмена) раньше, чем fn вернёт результат,
+  // возвращает нулевое значение T и ctx.Err().
+  func WithTimeout[T any](ctx context.Context, fn func() T) (T, error) {
+      // TODO
+      var zero T
+      return zero, nil
+  }
+hints:
+  - "Запустите `fn` в отдельной горутине, а результат передайте в канал. В основной горутине выбирайте через `select` между `<-done` (результат готов) и `<-ctx.Done()` (контекст завершился)."
+  - "Канал результата сделайте буферизованным (`make(chan T, 1)`). Иначе при таймауте, когда никто уже не читает канал, горутина `fn` навсегда зависнет на отправке — утечка."
+  - "В ветке `<-ctx.Done()` верните `var zero T` и `ctx.Err()` — он сам вернёт `context.DeadlineExceeded` при таймауте или `context.Canceled` при отмене."
+solution_md: |
+  ### Идея
+
+  Запускаем `fn` в отдельной горутине и её результат кладём в канал `done`.
+  Основная горутина в `select` ждёт, что случится первым: `fn` вернула результат
+  (`<-done`) или контекст завершился (`<-ctx.Done()`). В первом случае возвращаем
+  результат, во втором — нулевое значение и `ctx.Err()`.
+
+  Важная деталь — **буфер размера 1** у `done`. При таймауте основная горутина
+  уходит по ветке `<-ctx.Done()` и больше не читает `done`. Если бы канал был
+  небуферизованным, горутина `fn` навсегда зависла бы на `done <- ...` (утечка).
+  Буфер на один элемент позволяет ей завершиться, даже если результат уже никому
+  не нужен.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "context"
+
+  func WithTimeout[T any](ctx context.Context, fn func() T) (T, error) {
+      done := make(chan T, 1) // буфер 1 — fn не зависнет на отправке после таймаута
+      go func() {
+          done <- fn()
+      }()
+
+      select {
+      case r := <-done:
+          return r, nil
+      case <-ctx.Done():
+          var zero T
+          return zero, ctx.Err()
+      }
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Небуферизованный `done` — при таймауте горутина `fn` навсегда зависает на отправке (goroutine leak).
+  - Возвращать свою ошибку `errors.New("timeout")` вместо `ctx.Err()` — теряется различие между `DeadlineExceeded` и `Canceled`.
+  - Ждать `fn` без `select` (например, сначала `<-done`, потом проверять `ctx`) — таймаут не сработает, пока `fn` не завершится.
+  - Помнить: `fn`, начавшую долгую работу, эта обёртка не «убьёт» — она продолжит выполняться в фоне; отменять надо саму `fn` через тот же `ctx`.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "context"
+      "errors"
+      "sync"
+      "testing"
+      "time"
+  )
+
+  func TestWithTimeoutFast(t *testing.T) {
+      ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+      defer cancel()
+      got, err := WithTimeout(ctx, func() int { return 42 })
+      if err != nil {
+          t.Fatalf("неожиданная ошибка: %v", err)
+      }
+      if got != 42 {
+          t.Fatalf("результат %d, want 42", got)
+      }
+  }
+
+  func TestWithTimeoutDeadline(t *testing.T) {
+      ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+      defer cancel()
+      _, err := WithTimeout(ctx, func() int {
+          time.Sleep(200 * time.Millisecond)
+          return 1
+      })
+      if !errors.Is(err, context.DeadlineExceeded) {
+          t.Fatalf("ошибка = %v, want context.DeadlineExceeded", err)
+      }
+  }
+
+  func TestWithTimeoutCanceled(t *testing.T) {
+      ctx, cancel := context.WithCancel(context.Background())
+      go func() {
+          time.Sleep(20 * time.Millisecond)
+          cancel()
+      }()
+      _, err := WithTimeout(ctx, func() int {
+          time.Sleep(200 * time.Millisecond)
+          return 1
+      })
+      if !errors.Is(err, context.Canceled) {
+          t.Fatalf("ошибка = %v, want context.Canceled", err)
+      }
+  }
+
+  func TestWithTimeoutConcurrent(t *testing.T) {
+      var wg sync.WaitGroup
+      for i := 0; i < 50; i++ {
+          wg.Add(1)
+          go func(i int) {
+              defer wg.Done()
+              ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+              defer cancel()
+              got, err := WithTimeout(ctx, func() int { return i })
+              if err != nil || got != i {
+                  t.Errorf("got %d, err %v; want %d, nil", got, err, i)
+              }
+          }(i)
+      }
+      wg.Wait()
+  }

@@ -1,0 +1,163 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: concurrent-group-panic
+kind: go
+title: "Группа горутин с пробросом паники в Wait"
+difficulty: senior
+tags: [concurrency, waitgroup, panic]
+statement_md: |
+  Реализуйте `Group` — группу, которая запускает функции в отдельных горутинах и
+  дожидается их в `Wait()`. Если **любая** из функций запаниковала, `Wait()`
+  должен запаниковать с тем же значением.
+
+  ```go
+  func (g *Group) Go(fn func())   // запустить fn в отдельной горутине
+  func (g *Group) Wait()          // дождаться всех; паниковать, если паниковала любая
+  ```
+
+  Дано: нулевое значение `Group` готово к использованию (`var g Group`). `Go`
+  запускает `fn` в горутине и сам паниковать не должен — паника функции не
+  вылетает из `Go`. Позже, из `Wait()`, паника должна воспроизвестись с тем же
+  «содержимым» (аргументом `panic`). Если паниковали несколько — допустимо
+  воспроизвести любую из них.
+
+  Ключевая деталь: `recover()` ловит панику только в **той же** горутине, где она
+  произошла. Значит, перехватывать нужно внутри запускаемой горутины, а не в
+  `Wait`.
+
+  Требования: без гонок данных при сохранении паники (проверяется под `-race`).
+starter_code: |
+  package main
+
+  import "sync"
+
+  // Group запускает функции в горутинах и ждёт их в Wait().
+  // Если хотя бы одна запаниковала, Wait() паникует с тем же значением.
+  type Group struct {
+      wg sync.WaitGroup
+      // TODO: хранение перехваченной паники (без гонок)
+  }
+
+  // Go запускает fn в отдельной горутине.
+  func (g *Group) Go(fn func()) {
+      // TODO
+  }
+
+  // Wait ждёт завершения всех горутин; паникует, если запаниковала любая из них.
+  func (g *Group) Wait() {
+      // TODO
+  }
+hints:
+  - "`recover()` действует только в горутине, где случилась паника. Поэтому `defer func(){ recover() }()` нужно ставить ВНУТРИ горутины, запущенной в `Go`, — из `Wait` чужую панику не поймать."
+  - "Перехваченное значение (`r := recover()`) сохраните в поле структуры. Дождаться всех горутин — `sync.WaitGroup`: `Add(1)` в `Go`, `defer Done()` в горутине."
+  - "Поле с паникой пишут несколько горутин — защитите его `sync.Mutex` (сохраняйте только первую панику). В `Wait` после `wg.Wait()` под тем же мьютексом прочитайте значение и, если оно есть, сделайте `panic(значение)`."
+solution_md: |
+  ### Идея
+
+  `recover()` перехватывает панику только в той горутине, где она произошла, —
+  из `Wait` панику дочерней горутины не поймать. Поэтому `defer`+`recover`
+  ставим **внутри** каждой запускаемой в `Go` горутины. Перехваченное значение
+  складываем в поле `Group`, а после `wg.Wait()` в `Wait()` повторно вызываем
+  `panic` с ним.
+
+  Поле паники пишут несколько горутин одновременно, поэтому (в отличие от учебной
+  версии, где гонки «ещё не проходили») защищаем его `sync.Mutex` и сохраняем
+  только первую панику — так решение остаётся чистым под `-race`.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  type Group struct {
+      wg       sync.WaitGroup
+      mu       sync.Mutex
+      panicked bool
+      panicVal any
+  }
+
+  func (g *Group) Go(fn func()) {
+      g.wg.Add(1)
+      go func() {
+          defer g.wg.Done()
+          defer func() {
+              if r := recover(); r != nil {
+                  g.mu.Lock()
+                  if !g.panicked {
+                      g.panicked = true
+                      g.panicVal = r
+                  }
+                  g.mu.Unlock()
+              }
+          }()
+          fn()
+      }()
+  }
+
+  func (g *Group) Wait() {
+      g.wg.Wait()
+      g.mu.Lock()
+      panicked, val := g.panicked, g.panicVal
+      g.mu.Unlock()
+      if panicked {
+          panic(val)
+      }
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Ставить `recover()` в `Wait` — бесполезно, чужую панику там не перехватить; программа рухнет из паникующей горутины.
+  - Забыть `g.wg.Done()` при панике (не через `defer`) — `Wait` зависнет навсегда.
+  - Писать `panicVal` без синхронизации — гонка данных (учебная поблажка «тема гонок ещё не пройдена» под `-race` не проходит).
+  - Различать `nil`-панику: `recover()` вернёт не-nil для `panic(v)` при `v != nil`; хранить отдельный флаг `panicked` надёжнее, чем сравнивать `panicVal != nil`.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync/atomic"
+      "testing"
+  )
+
+  func TestGroupAllRun(t *testing.T) {
+      var g Group
+      var counter int64
+      const n = 50
+      for i := 0; i < n; i++ {
+          g.Go(func() { atomic.AddInt64(&counter, 1) })
+      }
+      g.Wait()
+      if counter != n {
+          t.Fatalf("выполнилось %d горутин, want %d", counter, n)
+      }
+  }
+
+  func TestGroupRePanics(t *testing.T) {
+      var g Group
+      var counter int64
+      g.Go(func() { atomic.AddInt64(&counter, 1) })
+      g.Go(func() { panic("boom") })
+      g.Go(func() { atomic.AddInt64(&counter, 1) })
+
+      defer func() {
+          r := recover()
+          if r == nil {
+              t.Fatal("Wait() не запаниковал, хотя одна из горутин запаниковала")
+          }
+          if r != "boom" {
+              t.Fatalf("Wait() паникует с %v, want \"boom\"", r)
+          }
+      }()
+      g.Wait() // должен запаниковать
+      t.Fatal("выполнение не должно дойти до этой строки")
+  }
+
+  func TestGroupNoPanic(t *testing.T) {
+      var g Group
+      g.Go(func() {})
+      g.Go(func() {})
+      g.Wait() // не должен паниковать
+  }

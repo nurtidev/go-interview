@@ -42,6 +42,10 @@ var (
 		"platform":      true,
 		"networks":      true,
 		"os":            true,
+		// private is a container section for the optional private content
+		// layer (see PRIVATE_CONTENT_DIR); it only has questions on
+		// instances that load one.
+		"private": true,
 	}
 	validDifficulty = map[string]bool{
 		"middle": true,

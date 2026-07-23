@@ -1,0 +1,171 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: idempotent-close
+kind: go
+title: "Идемпотентный Close (почему select+default не атомарен)"
+difficulty: senior
+tags: [concurrency, sync, idempotency]
+statement_md: |
+  Реализуйте `OnceCloser` — обёртку, которая гарантирует, что функция
+  освобождения ресурса `free` будет вызвана **не более одного раза**, даже если
+  `Close()` вызывают одновременно из многих горутин.
+
+  ```go
+  func NewOnceCloser(free func()) *OnceCloser
+  func (c *OnceCloser) Close()
+  ```
+
+  Дано: функция `free`, которую нельзя вызывать дважды (повторный вызов —
+  ошибка/паника). `Close()` при первом вызове выполняет `free`; повторные и
+  конкурентные вызовы не должны ни повторно вызывать `free`, ни паниковать.
+
+  Подвох: наивная защита через `select`+`default` по каналу-флагу **не решает
+  задачу** — выбор ветки `select` и её тело не атомарны, две горутины могут
+  одновременно провалиться в `default` и обе вызвать `free`. Нужна настоящая
+  атомарность операции «проверить-и-освободить».
+
+  Требования: `free` ровно один раз при любом числе конкурентных `Close()`
+  (проверяется под `-race`).
+starter_code: |
+  package main
+
+  // OnceCloser гарантирует, что free будет вызвана не более одного раза,
+  // в том числе при конкурентных вызовах Close().
+  type OnceCloser struct {
+      free func()
+      // TODO: сделать Close идемпотентным и безопасным при гонке
+  }
+
+  func NewOnceCloser(free func()) *OnceCloser {
+      // TODO
+      return &OnceCloser{free: free}
+  }
+
+  // Close вызывает free ровно один раз при первом вызове;
+  // повторные и конкурентные вызовы — без эффекта и без паники.
+  func (c *OnceCloser) Close() {
+      // TODO
+  }
+hints:
+  - "Флаг `bool` + `if closed { return }` работает только однопоточно: две горутины пройдут `if` одновременно (обе увидят `false`) и обе вызовут free. Проверка и изменение флага должны быть одной неделимой операцией."
+  - "`select { case <-closed: return; default: free(); close(closed) }` тоже НЕ спасает: выбор ветки и её тело — разные шаги, обе горутины могут попасть в `default`. `select` безопасен, но не даёт атомарности составной операции."
+  - "Правильно — `sync.Once`: `c.once.Do(c.free)` вызовет `free` ровно один раз при любом числе конкурентных вызовов. Эквивалент вручную — `sync.Mutex` вокруг `if !closed { free(); closed = true }`."
+solution_md: |
+  ### Идея
+
+  Задача идемпотентного `Close` — классический пример, где составную операцию
+  «проверить флаг → освободить ресурс → выставить флаг» нужно выполнить
+  **атомарно**. Разберём, почему очевидные попытки ломаются.
+
+  **Флаг `bool` без синхронизации** — работает при последовательных вызовах, но
+  при конкурентных обе горутины читают `closed == false`, обе проходят `if` и
+  обе зовут `free()`.
+
+  **`select`+`default` по каналу** — соблазнительно, но ошибочно:
+
+  ```go
+  func (c *OnceCloser) Close() {
+      select {
+      case <-c.closed:
+          return
+      default:
+          c.free()
+          close(c.closed)
+      }
+  }
+  ```
+
+  Пока канал не закрыт, обе конкурентные горутины проваливаются в `default` и обе
+  вызывают `free()`. Выбор ветки `select` и выполнение её тела — две разные
+  операции; `select` потокобезопасен сам по себе, но **не делает тело ветки
+  атомарным**. Более того, детектор гонок здесь может ничего не показать —
+  проблема не всегда проявляется как гонка данных.
+
+  **Правильно** — `sync.Once` (или `sync.Mutex` вокруг всей операции):
+
+  ```go
+  package main
+
+  import "sync"
+
+  type OnceCloser struct {
+      once sync.Once
+      free func()
+  }
+
+  func NewOnceCloser(free func()) *OnceCloser {
+      return &OnceCloser{free: free}
+  }
+
+  func (c *OnceCloser) Close() {
+      c.once.Do(c.free)
+  }
+  ```
+
+  `sync.Once.Do` гарантирует, что переданная функция выполнится ровно один раз за
+  всё время жизни `Once`, и остальные вызовы дождутся её завершения. Эквивалент
+  «руками»:
+
+  ```go
+  func (c *OnceCloser) Close() {
+      c.mu.Lock()
+      defer c.mu.Unlock()
+      if c.closed {
+          return
+      }
+      c.free()
+      c.closed = true
+  }
+  ```
+
+  Мьютекс заперт на весь метод — никакие две горутины не выполняют тело
+  одновременно, «проверить-и-освободить» становится атомарным.
+
+  ### Типичные ошибки на интервью
+
+  - `select`+`default` для «однократного» закрытия — гонка на теле ветки, редкий, но реальный двойной `free`.
+  - Флаг `bool` без мьютекса — гонка и двойное освобождение при конкуренции.
+  - `atomic.Bool.CompareAndSwap(false, true)` перед `free` — рабочий вариант, но легко испортить, забыв, что `free` должен выполниться именно у «победителя» CAS.
+  - Держать состояние без синхронизации, «потому что обычно всё равно один поток» — ровно та ошибка, которую ловит эта задача.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "testing"
+  )
+
+  func TestOnceCloserSequential(t *testing.T) {
+      calls := 0
+      c := NewOnceCloser(func() { calls++ })
+      c.Close()
+      c.Close()
+      c.Close()
+      if calls != 1 {
+          t.Fatalf("free вызвана %d раз(а), want 1", calls)
+      }
+  }
+
+  func TestOnceCloserConcurrent(t *testing.T) {
+      const goroutines = 200
+      // free — намеренно НЕ потокобезопасный инкремент обычного int:
+      // если реализация допустит хотя бы два одновременных вызова free,
+      // -race поймает гонку, а calls != 1 покажет двойное освобождение.
+      calls := 0
+      c := NewOnceCloser(func() { calls++ })
+
+      var wg sync.WaitGroup
+      wg.Add(goroutines)
+      for i := 0; i < goroutines; i++ {
+          go func() {
+              defer wg.Done()
+              c.Close()
+          }()
+      }
+      wg.Wait()
+
+      if calls != 1 {
+          t.Fatalf("free вызвана %d раз(а) при конкурентных Close, want 1", calls)
+      }
+  }

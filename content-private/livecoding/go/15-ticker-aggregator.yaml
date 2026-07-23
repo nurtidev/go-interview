@@ -1,0 +1,224 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: ticker-aggregator
+kind: go
+title: "Тикер-агрегатор: периодический сброс накопленной суммы"
+difficulty: staff
+tags: [concurrency, time, ticker]
+statement_md: |
+  Реализуйте `Aggregator`, который принимает значения и раз в `interval`
+  сбрасывает накопленную с прошлого раза сумму в выходной канал.
+
+  ```go
+  func NewAggregator(interval time.Duration) *Aggregator
+  func (a *Aggregator) Add(v int64)      // прибавить значение (из многих горутин)
+  func (a *Aggregator) Out() <-chan int64 // канал периодических сумм
+  func (a *Aggregator) Stop()            // досылает остаток и закрывает Out()
+  ```
+
+  Дано: значения поступают через `Add` из многих горутин. Каждые `interval`
+  времени агрегатор отправляет в `Out()` сумму значений, накопленную с момента
+  прошлого сброса, и обнуляет накопитель. `Stop()` досылает накопленный остаток
+  и закрывает `Out()`; после `Stop()` потребитель, читающий `for s := range
+  a.Out()`, штатно завершает цикл.
+
+  Требования:
+
+  - `Add` потокобезопасен для конкурентных вызовов (`-race`).
+  - Ни одно значение не теряется: сумма всех выданных в `Out()` величин равна
+    сумме всех `Add` (даже с учётом финального сброса в `Stop`).
+  - `Stop()` идемпотентен (повторные вызовы без паники), внутренняя горутина не
+    утекает.
+starter_code: |
+  package main
+
+  import "time"
+
+  // Aggregator суммирует значения из Add и раз в interval отправляет
+  // накопленную с прошлого раза сумму в Out(). Stop() досылает остаток
+  // и закрывает Out(). Add безопасен для вызова из многих горутин.
+  type Aggregator struct {
+      // TODO
+  }
+
+  func NewAggregator(interval time.Duration) *Aggregator {
+      // TODO
+      return &Aggregator{}
+  }
+
+  // Add прибавляет v к текущей накапливаемой сумме.
+  func (a *Aggregator) Add(v int64) {
+      // TODO
+  }
+
+  // Out возвращает канал, куда попадают периодические суммы.
+  func (a *Aggregator) Out() <-chan int64 {
+      // TODO
+      return nil
+  }
+
+  // Stop останавливает агрегатор: досылает остаток и закрывает Out(). Идемпотентен.
+  func (a *Aggregator) Stop() {
+      // TODO
+  }
+hints:
+  - "Накопитель `sum` защитите `sync.Mutex` (его конкурентно меняют `Add` и сброс). Внутренняя горутина на `time.NewTicker(interval)` крутит `select` между `<-ticker.C` (сброс) и `<-done` (остановка)."
+  - "Сброс (flush): под мьютексом заберите текущую `sum`, обнулите её, отпустите мьютекс и отправьте забранное значение в `out`. Захват+обнуление под одной блокировкой гарантируют сохранение суммы (ничего не теряется между сбросами)."
+  - "Stop через `sync.Once` закрывает канал `done`; горутина по `<-done` делает финальный flush и `close(out)` (лучше `defer close(out)`). Останавливайте тикер (`defer ticker.Stop()`). Финальный flush досылает остаток перед закрытием."
+solution_md: |
+  ### Идея
+
+  Накопитель `sum` конкурентно меняют и `Add`, и периодический сброс — защищаем
+  его `sync.Mutex`. Одна внутренняя горутина на `time.Ticker` крутит `select`
+  между тиком (`<-ticker.C` → сброс) и сигналом остановки (`<-done` → финальный
+  сброс и выход).
+
+  **Сброс (flush)** под мьютексом забирает текущую сумму и обнуляет накопитель,
+  затем отпускает мьютекс и отправляет забранное в `out`. Захват и обнуление под
+  одной блокировкой гарантируют сохранение суммы: всё, что добавили до сброса,
+  уходит в этот сброс, всё, что после, — накапливается для следующего. Поэтому
+  сумма всех выданных величин равна сумме всех `Add`.
+
+  `Stop` через `sync.Once` закрывает `done` (идемпотентность). Горутина по `done`
+  делает финальный flush остатка и закрывает `out` — потребитель на `range`
+  штатно завершается. `defer ticker.Stop()` освобождает тикер, `defer close(out)`
+  гарантирует закрытие выхода.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import (
+      "sync"
+      "time"
+  )
+
+  type Aggregator struct {
+      mu       sync.Mutex
+      sum      int64
+      out      chan int64
+      done     chan struct{}
+      stopOnce sync.Once
+  }
+
+  func NewAggregator(interval time.Duration) *Aggregator {
+      a := &Aggregator{
+          out:  make(chan int64),
+          done: make(chan struct{}),
+      }
+      go a.loop(interval)
+      return a
+  }
+
+  func (a *Aggregator) loop(interval time.Duration) {
+      ticker := time.NewTicker(interval)
+      defer ticker.Stop()
+      defer close(a.out)
+      for {
+          select {
+          case <-ticker.C:
+              a.flush()
+          case <-a.done:
+              a.flush() // досылаем остаток перед закрытием
+              return
+          }
+      }
+  }
+
+  func (a *Aggregator) flush() {
+      a.mu.Lock()
+      s := a.sum
+      a.sum = 0
+      a.mu.Unlock()
+      if s != 0 {
+          a.out <- s
+      }
+  }
+
+  func (a *Aggregator) Add(v int64) {
+      a.mu.Lock()
+      a.sum += v
+      a.mu.Unlock()
+  }
+
+  func (a *Aggregator) Out() <-chan int64 {
+      return a.out
+  }
+
+  func (a *Aggregator) Stop() {
+      a.stopOnce.Do(func() { close(a.done) })
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Менять `sum` в `Add` и в сбросе без мьютекса — гонка данных.
+  - Забыть финальный flush в `Stop` — теряется остаток, накопленный после последнего тика.
+  - Держать мьютекс во время `out <- s` — `Add` блокируется на всё время отправки (а при незакрытом потребителе — дедлок).
+  - `close(done)` без `sync.Once` — повторный `Stop()` роняет панику; забыть `close(out)` — потребитель на `range` зависает.
+time_limit_sec: 20
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "testing"
+      "time"
+  )
+
+  func TestAggregatorConservesTotal(t *testing.T) {
+      a := NewAggregator(5 * time.Millisecond)
+
+      var collected int64
+      consumerDone := make(chan struct{})
+      go func() {
+          for s := range a.Out() {
+              collected += s
+          }
+          close(consumerDone)
+      }()
+
+      const (
+          producers = 8
+          perP      = 1000
+      )
+      want := int64(producers * perP)
+      var wg sync.WaitGroup
+      wg.Add(producers)
+      for p := 0; p < producers; p++ {
+          go func() {
+              defer wg.Done()
+              for i := 0; i < perP; i++ {
+                  a.Add(1)
+                  if i%100 == 0 {
+                      time.Sleep(time.Millisecond) // растягиваем во времени — работают тики
+                  }
+              }
+          }()
+      }
+      wg.Wait()
+      a.Stop()
+
+      select {
+      case <-consumerDone:
+      case <-time.After(2 * time.Second):
+          t.Fatal("Out() не закрылся после Stop()")
+      }
+
+      if collected != want {
+          t.Fatalf("суммарно выдано %d, want %d (потеря значений)", collected, want)
+      }
+  }
+
+  func TestAggregatorStopIdempotent(t *testing.T) {
+      a := NewAggregator(10 * time.Millisecond)
+      go func() {
+          for range a.Out() {
+          }
+      }()
+      a.Add(5)
+      a.Stop()
+      a.Stop() // повторный Stop не должен паниковать
+      a.Stop()
+  }

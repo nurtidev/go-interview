@@ -1,0 +1,158 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: periodic-scheduler
+kind: go
+title: "Периодический планировщик с мгновенной отменой"
+difficulty: senior
+tags: [concurrency, time, ticker]
+statement_md: |
+  Напишите `Schedule` — запуск регулярного выполнения функции с заданным
+  интервалом и возможностью остановки.
+
+  ```go
+  func Schedule(dur time.Duration, fn func()) (cancel func())
+  ```
+
+  Дано: интервал `dur` и функция `fn`. `Schedule` возвращает `cancel`.
+
+  - Каждые `dur` времени выполняется `fn`.
+  - После `cancel()` вызовы `fn` прекращаются.
+
+  Требования:
+
+  - Пропущенные тики **не накапливаются**: если `fn` работает дольше `dur`, тик,
+    пришедшийся на момент, пока `fn` ещё выполняется, пропускается (а не копится в
+    очередь).
+  - Отмена **мгновенная**: горутина завершается сразу при `cancel()`.
+  - `cancel()` можно вызвать несколько раз — по первому останавливает, при
+    повторных **без паники**.
+  - Без гонок (`-race`).
+starter_code: |
+  package main
+
+  import "time"
+
+  // Schedule запускает регулярное выполнение fn каждые dur.
+  // Возвращает функцию отмены. После отмены fn больше не вызывается.
+  // Отмена мгновенная и идемпотентная. Пропущенные тики не накапливаются.
+  func Schedule(dur time.Duration, fn func()) (cancel func()) {
+      // TODO
+      return nil
+  }
+hints:
+  - "Регулярность даёт `time.NewTicker(dur)` — он шлёт время в `ticker.C` каждые dur. В горутине крутите `for`+`select` между `<-ticker.C` (вызвать fn) и `<-stop` (выйти)."
+  - "Чтобы тики не накапливались, вызывайте `fn` СИНХРОННО прямо в ветке `<-ticker.C`. Пока `fn` работает, из `ticker.C` никто не читает, а тикер лишние срабатывания не копит — они просто пропускаются."
+  - "Отмена: `cancel` закрывает канал `stop` (заворачивайте в `sync.Once` против повторной паники). Не забудьте `defer ticker.Stop()` в горутине, чтобы освободить тикер."
+solution_md: |
+  ### Идея
+
+  Регулярность обеспечивает `time.Ticker`: он периодически кладёт время в
+  `ticker.C`. Горутина крутит `for`+`select` между тиком (`<-ticker.C` — вызвать
+  `fn`) и отменой (`<-stop` — выйти). Отмену подаём закрытием канала `stop`,
+  завёрнутым в `sync.Once` ради идемпотентности.
+
+  Ключ к «не накапливать пропущенные тики» — вызывать `fn` **синхронно** прямо в
+  ветке тика. Пока `fn` выполняется, горутина не читает `ticker.C`; тикер, в
+  отличие от очереди, лишние срабатывания не копит — он подстраивается под темп
+  читателя, и «просроченные» тики просто пропадают. Поэтому медленная `fn` не
+  создаёт лавину отложенных запусков.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import (
+      "sync"
+      "time"
+  )
+
+  func Schedule(dur time.Duration, fn func()) (cancel func()) {
+      stop := make(chan struct{})
+      var once sync.Once
+
+      go func() {
+          ticker := time.NewTicker(dur)
+          defer ticker.Stop()
+          for {
+              select {
+              case <-ticker.C:
+                  fn() // синхронно: пока fn работает, тики не читаются и не копятся
+              case <-stop:
+                  return
+              }
+          }
+      }()
+
+      return func() {
+          once.Do(func() { close(stop) })
+      }
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Запускать `fn` в отдельной горутине на каждый тик — при медленной `fn` выполнения накапливаются и идут внахлёст.
+  - `time.Sleep(dur)` в цикле вместо тикера — отмена не мгновенная и период «плывёт» на время работы `fn`.
+  - `close(stop)` без `sync.Once` — повторный `cancel()` роняет «close of closed channel».
+  - Забыть `ticker.Stop()` — утечка ресурсов тикера после отмены.
+time_limit_sec: 18
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestScheduleRunsPeriodically(t *testing.T) {
+      var ticks int32
+      cancel := Schedule(20*time.Millisecond, func() {
+          atomic.AddInt32(&ticks, 1)
+      })
+      time.Sleep(230 * time.Millisecond)
+      cancel()
+      got := atomic.LoadInt32(&ticks)
+      if got < 4 {
+          t.Fatalf("за ~230мс с интервалом 20мс тиков %d, ожидали хотя бы 4", got)
+      }
+      if got > 40 {
+          t.Fatalf("подозрительно много тиков: %d", got)
+      }
+  }
+
+  func TestScheduleStopsAfterCancel(t *testing.T) {
+      var ticks int32
+      cancel := Schedule(20*time.Millisecond, func() {
+          atomic.AddInt32(&ticks, 1)
+      })
+      time.Sleep(70 * time.Millisecond)
+      cancel()
+      after := atomic.LoadInt32(&ticks)
+      time.Sleep(120 * time.Millisecond)
+      if got := atomic.LoadInt32(&ticks); got != after {
+          t.Fatalf("после отмены тики продолжились: было %d, стало %d", after, got)
+      }
+  }
+
+  func TestScheduleCancelIdempotent(t *testing.T) {
+      cancel := Schedule(20*time.Millisecond, func() {})
+      cancel()
+      cancel()
+      cancel() // повторные вызовы не должны паниковать
+  }
+
+  func TestScheduleNoAccumulation(t *testing.T) {
+      var ticks int32
+      cancel := Schedule(10*time.Millisecond, func() {
+          atomic.AddInt32(&ticks, 1)
+          time.Sleep(50 * time.Millisecond) // fn медленнее интервала
+      })
+      time.Sleep(300 * time.Millisecond)
+      cancel()
+      // если бы тики копились, было бы ~30; при синхронном вызове — не больше ~6-7
+      if got := atomic.LoadInt32(&ticks); got > 12 {
+          t.Fatalf("тики накапливаются при медленной fn: %d", got)
+      }
+  }

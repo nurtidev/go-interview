@@ -1,0 +1,228 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: leaked-goroutine-select
+kind: go
+title: "Зависшая горутина внутри select и как её починить"
+difficulty: senior
+tags: [concurrency, channels, goroutine-leak]
+statement_md: |
+  Реализуйте этап конвейера `Modify`, который читает значения из входного канала,
+  применяет к ним функцию `f` и пересылает результат в выходной канал — при этом
+  **не оставляя зависших горутин**.
+
+  ```go
+  func Modify(cancel <-chan struct{}, in <-chan int, f func(int) int) <-chan int
+  ```
+
+  Дано: входной канал `in`, функция `f` (может быть медленной) и канал отмены
+  `cancel`. Верните выходной канал, куда идут `f(v)` для каждого `v` из `in`.
+
+  Требования:
+
+  - Поддержка отмены: при закрытии `cancel` горутина завершается.
+  - Выходной канал закрывается, когда `in` исчерпан **или** пришла отмена.
+  - Подвох: горутина не должна зависнуть, даже если отмена пришла в момент, когда
+    горутина заблокирована на **отправке** результата в выход. Наивный
+    `select { case v := <-in: out <- f(v); case <-cancel: ... }` протекает:
+    выбрав ветку `<-in`, горутина застревает на `out <- ...` — а эта операция
+    уже не под защитой верхнего `select`, и `cancel` её не прервёт.
+
+  Проверяется под `-race` и на отсутствие утечки горутин.
+starter_code: |
+  package main
+
+  // Modify — этап конвейера: читает значения из in, применяет f и шлёт результат
+  // в выходной канал. Поддерживает отмену через cancel и НЕ должен оставлять
+  // зависших горутин, даже если отмена пришла, пока горутина заблокирована на
+  // отправке в выход. Выходной канал закрывается, когда in исчерпан или пришла
+  // отмена.
+  func Modify(cancel <-chan struct{}, in <-chan int, f func(int) int) <-chan int {
+      // TODO
+      return nil
+  }
+hints:
+  - "Верхний `select` должен уметь и принять из `in`, и заметить `cancel`. Но опасность — во второй операции внутри ветки: `out <- f(v)` может заблокироваться, а её `cancel` уже не покрывает."
+  - "Способ 1 — держать ветки `select` «пустыми»: сначала вычислите `r := f(v)` вне select, а в `select` отправляйте уже готовое значение: `select { case out <- r: case <-cancel: return }`. Тогда любая блокировка на отправке страхуется веткой отмены."
+  - "Способ 2 — вложенный `select`: на каждую потенциально блокирующую операцию чтения/записи навешивайте свой `select` с веткой `<-cancel`. Не забудьте `defer close(out)` и обработку закрытия `in` (`v, ok := <-in; if !ok { return }`)."
+solution_md: |
+  ### Идея
+
+  **Зависшие горутины (goroutine leak)** — вторая по частоте проблема после
+  дедлоков, но, в отличие от дедлока, рантайм их не обнаруживает: они тихо
+  остаются в памяти навсегда. Частая скрытая причина — горутина зависает
+  **внутри** ветки `select`, а не на самом `select`.
+
+  Опасный код:
+
+  ```go
+  for {
+      select {
+      case v := <-in:
+          out <- f(v) // застрянет здесь, если out никто не читает
+      case <-cancel:
+          return
+      }
+  }
+  ```
+
+  Выбрав ветку `case v := <-in`, горутина выполняет `out <- f(v)` — а это уже
+  обычная блокирующая отправка, не покрытая верхним `select`. Если в этот момент
+  закрыть `cancel`, горутина всё равно висит на `out <- ...` и не завершится.
+
+  Два надёжных приёма:
+
+  1. **Пустые ветки select** — тяжёлую операцию (`f(v)`) выполняем вне `select`,
+     а в сам `select` кладём только готовое к отправке значение.
+  2. **Вложенный select** — каждую блокирующую операцию (и приём, и отправку)
+     оборачиваем собственным `select` с веткой `<-cancel`.
+
+  Эталон ниже использует второй приём (обрабатывает и медленную `f`, и отправку):
+
+  ```go
+  package main
+
+  func Modify(cancel <-chan struct{}, in <-chan int, f func(int) int) <-chan int {
+      out := make(chan int)
+      go func() {
+          defer close(out)
+          for {
+              select {
+              case v, ok := <-in:
+                  if !ok {
+                      return // in закрыт — завершаемся, out закроется через defer
+                  }
+                  r := f(v)
+                  select { // вложенный select страхует отправку от зависания
+                  case out <- r:
+                  case <-cancel:
+                      return
+                  }
+              case <-cancel:
+                  return
+              }
+          }
+      }()
+      return out
+  }
+  ```
+
+  Первый приём выглядел бы так (короче, но `f` считается до входа в select):
+
+  ```go
+  for v := range in {
+      select {
+      case out <- f(v):
+      case <-cancel:
+          return
+      }
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - `out <- f(v)` внутри ветки верхнего select без вложенного select/выноса `f` — утечка при отмене во время отправки.
+  - Забыть `defer close(out)` — потребитель на `range out` зависнет навсегда.
+  - Не обработать закрытие `in` (`ok == false`) при чтении через `select` — бесконечный цикл с нулевыми значениями.
+  - Полагаться, что `-race` поймает утечку — не поймает: leak не является гонкой данных.
+time_limit_sec: 18
+race: true
+test_code: |
+  package main
+
+  import (
+      "runtime"
+      "testing"
+      "time"
+  )
+
+  func genUntil(cancel <-chan struct{}) <-chan int {
+      ch := make(chan int)
+      go func() {
+          defer close(ch)
+          for i := 0; ; i++ {
+              select {
+              case ch <- i:
+              case <-cancel:
+                  return
+              }
+          }
+      }()
+      return ch
+  }
+
+  func TestModifyForwardsAndCloses(t *testing.T) {
+      cancel := make(chan struct{})
+      defer close(cancel)
+      in := make(chan int, 3)
+      in <- 1
+      in <- 2
+      in <- 3
+      close(in)
+
+      out := Modify(cancel, in, func(x int) int { return x * 10 })
+
+      var got []int
+      done := make(chan struct{})
+      go func() {
+          for v := range out {
+              got = append(got, v)
+          }
+          close(done)
+      }()
+      select {
+      case <-done:
+      case <-time.After(2 * time.Second):
+          t.Fatal("выходной канал не закрылся после исчерпания in")
+      }
+      want := []int{10, 20, 30}
+      if len(got) != len(want) {
+          t.Fatalf("получено %v, want %v", got, want)
+      }
+      for i := range want {
+          if got[i] != want[i] {
+              t.Fatalf("got %v, want %v", got, want)
+          }
+      }
+  }
+
+  func TestModifyNoLeakOnCancelDuringSend(t *testing.T) {
+      base := runtime.NumGoroutine()
+
+      cancel := make(chan struct{})
+      in := genUntil(cancel)
+      out := Modify(cancel, in, func(x int) int {
+          time.Sleep(2 * time.Millisecond)
+          return x * 2
+      })
+
+      // читаем пару значений и перестаём читать — теперь горутина Modify
+      // почти наверняка заблокирована на отправке следующего значения в out
+      <-out
+      <-out
+      time.Sleep(10 * time.Millisecond)
+
+      close(cancel) // отмена в момент блокировки на out <- r
+
+      drained := make(chan struct{})
+      go func() {
+          for range out {
+          }
+          close(drained)
+      }()
+      select {
+      case <-drained:
+      case <-time.After(2 * time.Second):
+          t.Fatal("горутина Modify зависла внутри select на отправке в out (leaked goroutine)")
+      }
+
+      ok := false
+      for i := 0; i < 200; i++ {
+          if runtime.NumGoroutine() <= base {
+              ok = true
+              break
+          }
+          time.Sleep(10 * time.Millisecond)
+      }
+      if !ok {
+          t.Fatalf("горутины не завершились после отмены: было %d, стало %d (утечка)", base, runtime.NumGoroutine())
+      }
+  }

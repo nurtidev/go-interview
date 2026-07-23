@@ -1,0 +1,168 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: atomic-cas-max
+kind: go
+title: "Lock-free максимум через compare-and-swap"
+difficulty: senior
+tags: [atomic, cas, concurrency]
+statement_md: |
+  Реализуйте `MaxTracker` — потокобезопасный трекер максимума наблюдённых
+  значений. Обновление должно быть **lock-free** — через `sync/atomic` и
+  `CompareAndSwap`, без `sync.Mutex`.
+
+  ```go
+  func NewMaxTracker() *MaxTracker
+  func (m *MaxTracker) Observe(x int64)  // учесть значение
+  func (m *MaxTracker) Max() int64       // текущий максимум
+  ```
+
+  Дано: тысячи горутин конкурентно вызывают `Observe`. `Max` возвращает
+  наибольшее из всех наблюдённых значений (или `math.MinInt64`, если ещё ничего
+  не наблюдали).
+
+  Почему не подойдёт наивное `if x > m.v { m.v = x }`: между чтением `m.v` и
+  записью другая горутина могла обновить максимум — запись «затрёт» её значение
+  (потерянное обновление). Нужна атомарная операция «сравни-и-запиши».
+
+  Требования: без гонок и без потери обновлений (проверяется под `-race`).
+starter_code: |
+  package main
+
+  // MaxTracker хранит максимум из всех наблюдённых значений.
+  // Обновление должно быть lock-free (atomic + CompareAndSwap), без sync.Mutex.
+  type MaxTracker struct {
+      // TODO
+  }
+
+  func NewMaxTracker() *MaxTracker {
+      // TODO
+      return &MaxTracker{}
+  }
+
+  // Observe учитывает значение x, при необходимости увеличивая максимум.
+  func (m *MaxTracker) Observe(x int64) {
+      // TODO
+  }
+
+  // Max возвращает наибольшее наблюдённое значение
+  // (math.MinInt64, если ничего не наблюдали).
+  func (m *MaxTracker) Max() int64 {
+      // TODO
+      return 0
+  }
+hints:
+  - "Храните значение как `atomic.Int64`. Начальное значение — `math.MinInt64` (в `NewMaxTracker` через `Store`), чтобы `Max()` до наблюдений был корректным и любое первое `Observe` его перебивало."
+  - "Наивное `if x > v { v = x }` — гонка: между чтением и записью максимум мог вырасти, и вы его затрёте. Нужно атомарно «записать x, только если текущее значение всё ещё равно прочитанному»."
+  - "CAS-цикл: прочитать `cur := m.v.Load()`; если `x <= cur` — выйти; иначе `m.v.CompareAndSwap(cur, x)` — при успехе выйти, при неудаче (кто-то опередил) повторить цикл с новым `cur`."
+solution_md: |
+  ### Идея
+
+  Значение храним в `atomic.Int64`. Обновление максимума — составная операция
+  (прочитать текущий, сравнить, записать больший), поэтому наивное
+  `if x > v { v = x }` дало бы потерянные обновления: между чтением и записью
+  другой поток мог поднять максимум выше, а мы бы его затёрли.
+
+  Решение без блокировки — **CAS-цикл**. Читаем текущее значение `cur`. Если
+  наше `x` не больше — делать нечего. Иначе пытаемся `CompareAndSwap(cur, x)`:
+  запись пройдёт, только если значение всё ещё равно `cur` (никто не вмешался).
+  Если кто-то опередил и значение изменилось — CAS вернёт `false`, и мы
+  повторяем цикл уже с актуальным `cur`. Так гонка исключена без мьютекса.
+
+  Начальное значение — `math.MinInt64`, чтобы пустой трекер отдавал осмысленный
+  минимум и первое же наблюдение его перебивало (иначе отрицательные значения не
+  учитывались бы при инициализации нулём).
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import (
+      "math"
+      "sync/atomic"
+  )
+
+  type MaxTracker struct {
+      v atomic.Int64
+  }
+
+  func NewMaxTracker() *MaxTracker {
+      m := &MaxTracker{}
+      m.v.Store(math.MinInt64)
+      return m
+  }
+
+  func (m *MaxTracker) Observe(x int64) {
+      for {
+          cur := m.v.Load()
+          if x <= cur {
+              return
+          }
+          if m.v.CompareAndSwap(cur, x) {
+              return
+          }
+          // проиграли гонку — перечитываем cur и пробуем снова
+      }
+  }
+
+  func (m *MaxTracker) Max() int64 {
+      return m.v.Load()
+  }
+  ```
+
+  Сложность: амортизированно `O(1)` на `Observe` (цикл повторяется только под
+  реальной конкуренцией), полностью lock-free.
+
+  ### Типичные ошибки на интервью
+
+  - `if x > m.v.Load() { m.v.Store(x) }` — потерянное обновление между `Load` и `Store`.
+  - CAS без цикла: одна неудачная попытка — и обновление молча теряется.
+  - Инициализация нулём вместо `math.MinInt64` — трекер «не видит» значений меньше нуля до первого положительного.
+  - Обычный `int64` вместо `atomic.Int64` с CAS — гонка данных, ловится `-race`.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "math"
+      "sync"
+      "sync/atomic"
+      "testing"
+  )
+
+  func TestMaxTrackerEmpty(t *testing.T) {
+      m := NewMaxTracker()
+      if got := m.Max(); got != math.MinInt64 {
+          t.Fatalf("Max() пустого трекера = %d, want math.MinInt64", got)
+      }
+  }
+
+  func TestMaxTrackerConcurrent(t *testing.T) {
+      m := NewMaxTracker()
+      const (
+          goroutines = 100
+          perG       = 1000
+      )
+      var globalMax int64 = math.MinInt64
+      var wg sync.WaitGroup
+      wg.Add(goroutines)
+      for g := 0; g < goroutines; g++ {
+          go func(g int) {
+              defer wg.Done()
+              for i := 0; i < perG; i++ {
+                  v := int64(g*perG + i)
+                  for {
+                      cur := atomic.LoadInt64(&globalMax)
+                      if v <= cur || atomic.CompareAndSwapInt64(&globalMax, cur, v) {
+                          break
+                      }
+                  }
+                  m.Observe(v)
+              }
+          }(g)
+      }
+      wg.Wait()
+      if got, want := m.Max(), atomic.LoadInt64(&globalMax); got != want {
+          t.Fatalf("Max() = %d, want %d (потеряно обновление?)", got, want)
+      }
+  }

@@ -1,0 +1,144 @@
+# приватный тренажёр, по мотивам курса «Многозадачность в Go», личное использование
+slug: delayed-call
+kind: go
+title: "Отложенный вызов с мгновенной отменой (аналог time.AfterFunc)"
+difficulty: middle
+tags: [concurrency, time, cancellation]
+statement_md: |
+  Напишите `Delay` — аналог `time.AfterFunc()`: он выполняет функцию спустя
+  заданное время, но с возможностью отмены.
+
+  ```go
+  func Delay(dur time.Duration, fn func()) (cancel func())
+  ```
+
+  Дано: интервал `dur` и функция `fn`. `Delay` возвращает функцию `cancel`.
+
+  - Через `dur` времени `fn` выполняется — если до этого не вызвали `cancel`.
+  - Если `cancel()` вызван **до** истечения `dur` — `fn` не выполняется.
+  - Если `cancel()` вызван **после** — ничего не происходит.
+
+  Требования:
+
+  - Отмена **мгновенная**: горутина, запущенная внутри `Delay`, завершается
+    сразу при `cancel()`, а не «доспав» оставшееся время.
+  - `cancel()` можно вызвать несколько раз — по первому происходит отмена, при
+    повторных **не должно быть паники**.
+  - Без гонок (`-race`).
+starter_code: |
+  package main
+
+  import "time"
+
+  // Delay выполняет fn спустя dur, если до истечения dur не была вызвана отмена.
+  // Возвращает функцию отмены. Отмена мгновенная и идемпотентная.
+  func Delay(dur time.Duration, fn func()) (cancel func()) {
+      // TODO
+      return nil
+  }
+hints:
+  - "Нельзя полагаться на `time.Sleep(dur)` внутри горутины — сон не прервать досрочно, отмена не будет мгновенной. Нужны таймер и канал отмены, выбираемые через `select`."
+  - "Запустите горутину с `select` между `<-time.After(dur)` (истёк срок → вызвать fn) и `<-stop` (пришла отмена → просто выйти). Ветка `stop` даёт мгновенный выход, не дожидаясь dur."
+  - "`cancel` должен закрывать канал `stop`. Чтобы повторные вызовы не паниковали «close of closed channel», оберните закрытие в `sync.Once`."
+solution_md: |
+  ### Идея
+
+  Мгновенная отмена означает, что горутину нельзя «усыпить» на `dur` — из сна её
+  не разбудить раньше срока. Вместо этого горутина висит в `select` между двумя
+  каналами: канал таймера (`time.After(dur)`) и канал отмены `stop`. Что
+  разблокируется первым, то и определяет исход: истёк таймер — вызываем `fn`;
+  пришла отмена — просто выходим.
+
+  Отмену подаём закрытием канала `stop`. Чтобы `cancel()` был идемпотентным и не
+  паниковал при повторном `close`, заворачиваем закрытие в `sync.Once`.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import (
+      "sync"
+      "time"
+  )
+
+  func Delay(dur time.Duration, fn func()) (cancel func()) {
+      stop := make(chan struct{})
+      var once sync.Once
+
+      go func() {
+          timer := time.NewTimer(dur)
+          defer timer.Stop()
+          select {
+          case <-timer.C:
+              fn()
+          case <-stop:
+              // мгновенный выход, не дожидаясь dur
+          }
+      }()
+
+      return func() {
+          once.Do(func() { close(stop) })
+      }
+  }
+  ```
+
+  `sync.Once` гарантирует ровно одно `close(stop)` даже при нескольких `cancel()`
+  подряд. `timer.Stop()` в `defer` освобождает ресурсы таймера при отмене.
+
+  ### Типичные ошибки на интервью
+
+  - `time.Sleep(dur)` внутри горутины — отмена перестаёт быть мгновенной.
+  - `close(stop)` без `sync.Once` — второй `cancel()` роняет «close of closed channel».
+  - Проверять «отменили ли» через `bool` без синхронизации — гонка между `cancel` из одной горутины и чтением из горутины таймера.
+  - Забыть `timer.Stop()` — не смертельно, но оставляет висеть таймер до срабатывания.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestDelayRunsWhenNotCanceled(t *testing.T) {
+      var ran atomic.Bool
+      Delay(20*time.Millisecond, func() { ran.Store(true) })
+      time.Sleep(80 * time.Millisecond)
+      if !ran.Load() {
+          t.Fatal("fn не выполнилась спустя dur без отмены")
+      }
+  }
+
+  func TestDelayCanceledDoesNotRun(t *testing.T) {
+      var ran atomic.Bool
+      cancel := Delay(100*time.Millisecond, func() { ran.Store(true) })
+      cancel()
+      time.Sleep(160 * time.Millisecond)
+      if ran.Load() {
+          t.Fatal("fn выполнилась несмотря на отмену до истечения dur")
+      }
+  }
+
+  func TestDelayCancelIdempotent(t *testing.T) {
+      cancel := Delay(50*time.Millisecond, func() {})
+      cancel()
+      cancel()
+      cancel() // повторные вызовы не должны паниковать
+  }
+
+  func TestDelayCancelFromGoroutine(t *testing.T) {
+      var ran atomic.Bool
+      cancel := Delay(100*time.Millisecond, func() { ran.Store(true) })
+      var wg sync.WaitGroup
+      wg.Add(1)
+      go func() { defer wg.Done(); cancel() }()
+      wg.Wait()
+      time.Sleep(160 * time.Millisecond)
+      if ran.Load() {
+          t.Fatal("fn выполнилась несмотря на отмену из другой горутины")
+      }
+  }

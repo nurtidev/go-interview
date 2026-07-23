@@ -32,6 +32,11 @@ WORKDIR /app
 COPY --from=build /out/server /app/server
 COPY --from=web /app/web/dist /app/web/dist
 COPY content/ /app/content/
+# content-private/ ships an optional, gitignored-content layer (README +
+# .gitkeep by default) baked into every image. It is only loaded at runtime
+# when PRIVATE_CONTENT_DIR is set (e.g. to /app/content-private) — left unset
+# below, so a public build never reads it.
+COPY content-private/ /app/content-private/
 
 ENV PORT=8080 \
     DB_PATH=/data/app.db \
