@@ -1,0 +1,50 @@
+# приватный тренажёр, Go-квизы, личное использование
+slug: quiz-typed-nil-pointer-deref-panic
+section: go-internals
+title: "interface{} != nil для типизированного nil -> дереференс паникует"
+difficulty: senior
+tags: [interface, nil, type-assertion, panic]
+question_md: |
+  Что выведет этот код (или почему)?
+
+  ```go
+  func printNumber(ptrToNumber interface{}) {
+    if ptrToNumber != nil {
+      fmt.Println(*ptrToNumber.(*int))
+    } else {
+      fmt.Println("nil")
+    }
+  }
+
+  func main() {
+    v := 10
+    printNumber(&v)
+    var pv *int
+    printNumber(pv)
+    pv = &v
+    printNumber(pv)
+  }
+  ```
+answer_levels:
+  - level: middle
+    text_md: |
+      Выведет `10`, затем паника:
+
+      ```
+      10
+      panic: runtime error: invalid memory address or nil pointer dereference
+      ```
+
+      Первый вызов `printNumber(&v)` печатает `10`. Второй вызов передаёт `var pv *int` (nil-указатель), но внутри интерфейса он становится `(*int, nil)` — то есть `ptrToNumber != nil` истинно! Заходим в then-ветку, `*ptrToNumber.(*int)` разыменовывает nil-указатель -> паника. Третий вызов не выполняется.
+  - level: senior
+    text_md: |
+      Ловушка типизированного nil. `pv` типа `*int` равен nil, но при упаковке в `interface{}` получаем пару `(тип=*int, data=nil)`. Проверка `ptrToNumber != nil` сравнивает интерфейс с nil-интерфейсом `(nil,nil)` -> НЕ равны (тип непустой) -> true. Then-ветка делает type assertion `.(*int)` (успешно, тип совпадает) и разыменовывает nil -> `SIGSEGV` -> паника.
+
+      То есть проверка `!= nil` не защищает от nil-указателя ВНУТРИ интерфейса — она ловит только пустой интерфейс.
+  - level: deep
+    text_md: |
+      Чтобы функция работала (по условию сигнатуру менять нельзя), проверять нужно после assertion сам указатель: `if p, ok := ptrToNumber.(*int); ok && p != nil { fmt.Println(*p) } else { fmt.Println("nil") }`. Ключевой урок: `interface{} != nil` и «указатель внутри != nil» — разные вопросы. Тот же корень, что у бага `error`-интерфейса. Дополнительно: comma-ok форма assertion (`v, ok := x.(T)`) не паникует при несовпадении типа, а «голая» (`x.(T)`) — паникует; здесь тип совпал, поэтому упала именно разыменование, а не assertion.
+follow_ups:
+  - "Почему ptrToNumber != nil истинно, хотя передали nil-указатель?"
+  - "Как переписать then-ветку, чтобы обработать nil-указатель без паники (сигнатуру не меняя)?"
+  - "Чем comma-ok форма type assertion отличается от голой при несовпадении типа?"

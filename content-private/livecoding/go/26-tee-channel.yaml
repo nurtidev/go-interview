@@ -1,0 +1,208 @@
+# приватный тренажёр, личное использование
+slug: tee-channel
+kind: go
+title: "Tee-канал: раздвоение потока"
+difficulty: senior
+tags: [concurrency, channels, cancellation]
+statement_md: |
+  Реализуйте `Tee` — раздвоение потока: каждое значение из входного канала
+  доставляется в **оба** выходных канала.
+
+  ```go
+  func Tee(done <-chan struct{}, in <-chan int) (<-chan int, <-chan int)
+  ```
+
+  Дано: канал отмены `done` и входной канал `in`. Верните два выходных канала.
+  Каждое значение из `in` должно уйти и в первый, и во второй выход.
+
+  Требования:
+
+  - Значение попадает в оба выхода (порядок сохраняется, ничего не теряется).
+  - Работа прекращается, когда закрыт `in` **или** закрыт `done`; оба выходных
+    канала при этом закрываются.
+  - Единственная рабочая горутина не должна утекать (проверяется под `-race` и по
+    числу горутин).
+starter_code: |
+  package main
+
+  // Tee раздваивает поток: каждое значение из in доставляется в ОБА выходных
+  // канала. Работа прекращается, когда закрыт in или закрыт done; оба выхода при
+  // этом закрываются. Горутина не должна утекать.
+  func Tee(done <-chan struct{}, in <-chan int) (<-chan int, <-chan int) {
+      // TODO
+      return nil, nil
+  }
+hints:
+  - "Одна горутина читает `in` и на каждое значение должна отправить его в оба выхода, прежде чем брать следующее. Иначе потребители рассинхронизируются или значение потеряется."
+  - "Чтобы не отправить дважды в один и тот же выход, заведите локальные копии `o1, o2 := out1, out2` и делайте два прохода `select`: после успешной отправки обнуляйте отправленный канал (`o1 = nil`) — ветка с nil-каналом больше не выберется."
+  - "В каждый `select` (и на чтении `in`, и на отправке) добавляйте `case <-done: return`. `defer close(out1); defer close(out2)` закроют оба выхода при любом выходе из горутины."
+solution_md: |
+  ### Идея
+
+  Один читатель `in` рассылает каждое значение в оба выхода. Ключ — отправить `v`
+  **в оба** канала, прежде чем читать следующее значение, и при этом не отправить
+  дважды в один и тот же выход и не зависнуть, если потребитель у одного из
+  выходов медленный.
+
+  Трюк с `nil`-каналом: берём локальные `o1, o2 := out1, out2` и делаем ровно два
+  прохода `select` по обеим отправкам. Как только отправили в один — обнуляем его
+  (`o1 = nil`); отправка в `nil`-канал никогда не выбирается в `select`, поэтому
+  второй проход гарантированно отправит в оставшийся выход. Во всех блокирующих
+  местах есть ветка `<-done` для мгновенной остановки; `defer close(...)` на оба
+  выхода закрывает их при любом завершении горутины (закрытие `in` или `done`).
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  func Tee(done <-chan struct{}, in <-chan int) (<-chan int, <-chan int) {
+      out1 := make(chan int)
+      out2 := make(chan int)
+      go func() {
+          defer close(out1)
+          defer close(out2)
+          for {
+              select {
+              case <-done:
+                  return
+              case v, ok := <-in:
+                  if !ok {
+                      return
+                  }
+                  // отправляем v в оба выхода; локальные копии обнуляем после
+                  // отправки, чтобы не отправить дважды в один и тот же канал.
+                  o1, o2 := out1, out2
+                  for i := 0; i < 2; i++ {
+                      select {
+                      case <-done:
+                          return
+                      case o1 <- v:
+                          o1 = nil
+                      case o2 <- v:
+                          o2 = nil
+                      }
+                  }
+              }
+          }
+      }()
+      return out1, out2
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Отправлять последовательно `out1 <- v; out2 <- v` без `nil`-трюка — если потребитель `out1` завис, вторая отправка не начнётся, и `done` не спасёт между строками.
+  - Не обнулять уже отправленный канал — можно повторно выбрать ту же ветку и отправить в один выход дважды, потеряв значение для другого.
+  - Забыть `case <-done` на отправке — при отмене, когда потребитель ушёл, горутина зависнет (утечка).
+  - Закрыть только один из выходов — второй потребитель на `range` зависнет.
+time_limit_sec: 20
+race: true
+test_code: |
+  package main
+
+  import (
+      "runtime"
+      "sync"
+      "testing"
+      "time"
+  )
+
+  func TestTeeDeliversToBoth(t *testing.T) {
+      done := make(chan struct{})
+      defer close(done)
+      in := make(chan int)
+      go func() {
+          defer close(in)
+          for i := 1; i <= 5; i++ {
+              in <- i
+          }
+      }()
+
+      out1, out2 := Tee(done, in)
+
+      var got1, got2 []int
+      var wg sync.WaitGroup
+      wg.Add(2)
+      go func() {
+          defer wg.Done()
+          for v := range out1 {
+              got1 = append(got1, v)
+          }
+      }()
+      go func() {
+          defer wg.Done()
+          for v := range out2 {
+              got2 = append(got2, v)
+          }
+      }()
+
+      finished := make(chan struct{})
+      go func() { wg.Wait(); close(finished) }()
+      select {
+      case <-finished:
+      case <-time.After(2 * time.Second):
+          t.Fatal("выходные каналы не закрылись после исчерпания in")
+      }
+
+      want := []int{1, 2, 3, 4, 5}
+      for _, g := range [][]int{got1, got2} {
+          if len(g) != len(want) {
+              t.Fatalf("получено %v, want %v", g, want)
+          }
+          for i := range want {
+              if g[i] != want[i] {
+                  t.Fatalf("получено %v, want %v (порядок нарушен?)", g, want)
+              }
+          }
+      }
+  }
+
+  func TestTeeStopsOnDone(t *testing.T) {
+      base := runtime.NumGoroutine()
+      done := make(chan struct{})
+      in := make(chan int)
+      go func() {
+          for i := 0; ; i++ {
+              select {
+              case in <- i:
+              case <-done:
+                  return
+              }
+          }
+      }()
+
+      out1, out2 := Tee(done, in)
+      for i := 0; i < 3; i++ {
+          <-out1
+          <-out2
+      }
+      close(done)
+
+      for _, out := range []<-chan int{out1, out2} {
+          deadline := time.After(2 * time.Second)
+          for {
+              select {
+              case _, ok := <-out:
+                  if !ok {
+                      goto next
+                  }
+              case <-deadline:
+                  t.Fatal("выход не закрылся после close(done)")
+              }
+          }
+      next:
+      }
+
+      ok := false
+      for i := 0; i < 200; i++ {
+          if runtime.NumGoroutine() <= base+1 {
+              ok = true
+              break
+          }
+          time.Sleep(10 * time.Millisecond)
+      }
+      if !ok {
+          t.Fatalf("горутины утекли после done: было %d, стало %d", base, runtime.NumGoroutine())
+      }
+  }

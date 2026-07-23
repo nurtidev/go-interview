@@ -1,0 +1,50 @@
+# приватный тренажёр, Go-квизы, личное использование
+slug: quiz-struct-size-alignment-padding
+section: go-internals
+title: "unsafe.Sizeof и порядок полей: padding"
+difficulty: senior
+tags: [struct, alignment, padding, unsafe]
+question_md: |
+  Что будет в результате выполнения теста (или почему)?
+
+  ```go
+  type User struct {
+    Valid  bool
+    Id     int64
+    Number int32
+  }
+  type CUser struct {
+    Id     int64
+    Number int32
+    Valid  bool
+  }
+  func TestSize(t *testing.T) {
+    user := User{}
+    cuser := CUser{}
+    if unsafe.Sizeof(user) == unsafe.Sizeof(cuser) {
+      t.Log("structs size are equal")
+    }
+  }
+  ```
+answer_levels:
+  - level: middle
+    text_md: |
+      Тест ПРОЙДЁТ (PASS), но лог `"structs size are equal"` НЕ напечатается — размеры разные: `sizeof(User) == 24`, `sizeof(CUser) == 16`. Условие ложно, `t.Log` внутри `if` не вызывается, а `t.Error`/`Fail` в тесте нет, поэтому тест зелёный без вывода.
+
+      Причина — padding (выравнивание). В `User` `bool` перед `int64` заставляет вставить 7 байт паддинга; в `CUser` поля упорядочены плотнее, паддинга меньше.
+  - level: senior
+    text_md: |
+      Каждое поле выравнивается по своему alignment (int64 -> 8, int32 -> 4, bool -> 1), размер структуры кратен максимальному alignment (8).
+
+      `User{Valid bool; Id int64; Number int32}`: bool@0 (1) + pad 7 -> int64@8 (8) -> int32@16 (4), итого 20, округляем до кратного 8 -> **24**.
+
+      `CUser{Id int64; Number int32; Valid bool}`: int64@0 (8) -> int32@8 (4) -> bool@12 (1), итого 13, округляем до 8 -> **16**.
+
+      Тот же набор полей, но порядок «от больших к меньшим» экономит 8 байт. Тест лишь молча не логирует — практический вывод про поведение теста: `t.Log` в невыполненной ветке не значит провал.
+  - level: deep
+    text_md: |
+      Правило укладки: сортировка полей по убыванию размера обычно минимизирует padding (field alignment / struct packing). На больших слайсах структур это заметная экономия памяти и лучшая cache-locality. Инструменты: `go vet -fieldalignment` (или `fieldalignment` из golang.org/x/tools) подсказывают оптимальный порядок. Тонкости: пустая структура `struct{}` имеет размер 0; если она ПОСЛЕДНЕЕ поле ненулевой структуры, компилятор добавляет padding-байт, чтобы указатель на неё не уходил за пределы аллокации. Также `unsafe.Sizeof` — это размер самого значения (shallow), без учёта данных, на которые указывают поля-указатели/slice/map.
+follow_ups:
+  - "Как посчитать sizeof для каждой структуры по offset'ам полей?"
+  - "Почему порядок полей от больших к меньшим экономит память?"
+  - "Пройдёт ли тест, если размеры окажутся равны — и что тогда изменится в выводе?"

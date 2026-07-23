@@ -1,0 +1,159 @@
+# приватный тренажёр, личное использование
+slug: once-do
+kind: go
+title: "Реализовать sync.Once с нуля"
+difficulty: senior
+tags: [concurrency, atomic, mutex]
+statement_md: |
+  Реализуйте аналог `sync.Once` — примитив «выполнить действие ровно один раз».
+
+  ```go
+  type Once struct { /* ... */ }
+  func (o *Once) Do(fn func())
+  ```
+
+  Контракт (как у стандартного `sync.Once`):
+
+  - `fn` выполняется **ровно один раз** за всё время жизни `Once`, сколько бы
+    горутин ни звали `Do` (и с какими бы `fn`).
+  - `Do` **не возвращается**, пока первый вызов `fn` не завершится: конкурентный
+    вызов `Do` обязан дождаться конца первого `fn`, а не проскочить мимо.
+  - Эффекты первого `fn` должны быть видимы после возврата любого `Do`
+    (корректная публикация — проверяется под `-race`).
+
+  Требования: без гонок, быстрый путь после первого выполнения — без дорогой
+  блокировки.
+starter_code: |
+  package main
+
+  // Once — аналог sync.Once, написанный с нуля. Do выполняет fn ровно один раз за
+  // всё время жизни Once, сколько бы горутин ни вызывали Do. Do не возвращается,
+  // пока первый вызов fn не завершится: конкурентный вызов блокируется до конца
+  // первого fn, а не проскакивает мимо.
+  type Once struct {
+      // TODO
+  }
+
+  func (o *Once) Do(fn func()) {
+      // TODO
+  }
+hints:
+  - "Нужны два состояния: атомарный флаг «уже сделано» (`atomic.Bool`) для дешёвого быстрого пути и `sync.Mutex`, чтобы сериализовать одновременные первые вызовы."
+  - "Быстрый путь: `if o.done.Load() { return }`. Медленный: берёте `Lock`, ПЕРЕПРОВЕРЯЕТЕ `done` (вдруг кто-то успел), и если ещё не сделано — вызываете `fn`, а флаг выставляете ПОСЛЕ `fn`."
+  - "Флаг ставьте `defer o.done.Store(true)` — тогда он выставится после возврата `fn`, но до снятия мьютекса. Это даёт и «Do ждёт конца fn», и happens-before: конкурент, увидевший `done == true`, увидит и эффекты `fn`."
+solution_md: |
+  ### Идея
+
+  Как в реальном `sync.Once`: дешёвый быстрый путь на атомарном флаге плюс
+  медленный путь под мьютексом.
+
+  Быстрый путь — `if o.done.Load() { return }`: после первого выполнения все
+  последующие `Do` уходят мгновенно, без мьютекса.
+
+  Медленный путь берёт `Lock`, **перепроверяет** `done` под ним (double-checked:
+  вдруг другая горутина уже всё сделала, пока мы ждали блокировку) и, если ещё не
+  сделано, вызывает `fn`. Флаг `done` выставляем `defer o.done.Store(true)` —
+  после возврата `fn`, но ещё под мьютексом. Это даёт два свойства сразу:
+  конкурентные `Do` блокируются на мьютексе до конца первого `fn` (не
+  проскакивают), а тот, кто позже увидит `done == true` на быстром пути, по
+  правилам модели памяти Go увидит и все эффекты `fn` (корректная публикация).
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import (
+      "sync"
+      "sync/atomic"
+  )
+
+  type Once struct {
+      done atomic.Bool
+      mu   sync.Mutex
+  }
+
+  func (o *Once) Do(fn func()) {
+      // Быстрый путь без блокировки: если уже сделано — выходим.
+      if o.done.Load() {
+          return
+      }
+      // Медленный путь: сериализуем вызовы и перепроверяем под мьютексом.
+      o.mu.Lock()
+      defer o.mu.Unlock()
+      if !o.done.Load() {
+          defer o.done.Store(true) // выставляем ПОСЛЕ fn — чтобы Do ждал завершения fn
+          fn()
+      }
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Только флаг `bool` без мьютекса — гонка (`-race`) и возможны два одновременных вызова `fn`.
+  - Выставить `done = true` ДО вызова `fn` — конкурент увидит флаг и вернётся, хотя `fn` ещё не отработала (нарушен контракт «Do ждёт конца fn» и публикация).
+  - Обычный `bool` вместо `atomic.Bool` на быстром пути без мьютекса — data race на чтении флага.
+  - Забыть перепроверку под `Lock` — на медленном пути `fn` может выполниться дважды.
+time_limit_sec: 18
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestOnceRunsExactlyOnce(t *testing.T) {
+      var o Once
+      var calls int32
+      const goroutines = 200
+      var wg sync.WaitGroup
+      wg.Add(goroutines)
+      for i := 0; i < goroutines; i++ {
+          go func() {
+              defer wg.Done()
+              o.Do(func() {
+                  atomic.AddInt32(&calls, 1)
+                  time.Sleep(5 * time.Millisecond)
+              })
+          }()
+      }
+      wg.Wait()
+      if calls != 1 {
+          t.Fatalf("fn выполнилась %d раз, want 1", calls)
+      }
+  }
+
+  func TestOncePublishesResult(t *testing.T) {
+      // После возврата Do эффект fn обязан быть виден (happens-before).
+      // Под -race некорректная синхронизация будет поймана.
+      var o Once
+      var shared int
+      const goroutines = 50
+      var wg sync.WaitGroup
+      wg.Add(goroutines)
+      for i := 0; i < goroutines; i++ {
+          go func() {
+              defer wg.Done()
+              o.Do(func() { shared = 42 })
+              if shared != 42 {
+                  t.Errorf("после Do значение shared=%d, want 42", shared)
+              }
+          }()
+      }
+      wg.Wait()
+  }
+
+  func TestOnceSecondCallSkips(t *testing.T) {
+      var o Once
+      var calls int32
+      o.Do(func() { atomic.AddInt32(&calls, 1) })
+      o.Do(func() { atomic.AddInt32(&calls, 1) })
+      o.Do(func() { atomic.AddInt32(&calls, 1) })
+      if calls != 1 {
+          t.Fatalf("fn выполнилась %d раз, want 1", calls)
+      }
+  }

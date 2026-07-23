@@ -1,0 +1,160 @@
+# приватный тренажёр, личное использование
+slug: fan-in-workers
+kind: go
+title: "Fan-out/fan-in: пул воркеров над общим каналом"
+difficulty: middle
+tags: [concurrency, channels, waitgroup]
+statement_md: |
+  Реализуйте fan-out/fan-in: `FanIn` запускает `workers` горутин, которые
+  разбирают значения из одного входного канала `in`, применяют к каждому `fn` и
+  складывают результаты в общий выходной канал.
+
+  ```go
+  func FanIn(in <-chan int, workers int, fn func(int) int) <-chan int
+  ```
+
+  Дано: входной канал `in` (кто-то в него пишет и затем закрывает), число
+  воркеров `workers` и функция `fn`. Верните выходной канал со всеми
+  результатами `fn(v)` для каждого `v` из `in` (порядок не важен).
+
+  Требования:
+
+  - Обработка идёт параллельно: `workers` горутин одновременно тянут из `in`.
+  - Выходной канал закрывается **ровно один раз**, когда `in` исчерпан и все
+    воркеры завершились — иначе потребитель на `for v := range out` зависнет.
+  - Без гонок и без потери/дублирования значений (проверяется под `-race`).
+starter_code: |
+  package main
+
+  // FanIn запускает workers горутин, каждая читает из in, применяет fn и пишет
+  // результат в общий выходной канал. Выход закрывается ровно один раз, когда
+  // все воркеры завершились (in исчерпан).
+  func FanIn(in <-chan int, workers int, fn func(int) int) <-chan int {
+      // TODO
+      return nil
+  }
+hints:
+  - "Ошибка — закрывать `out` внутри воркера: пока один закрывает, другой ещё пишет → паника «send on closed channel». Закрыть `out` должна одна сторона и ровно один раз."
+  - "Запустите `workers` горутин, каждая `for v := range in { out <- fn(v) }`. Когда `in` закрыт, `range` завершается и воркер выходит — так воркеры разбирают общий вход конкурентно, без дублей."
+  - "Синхронизируйте закрытие через `sync.WaitGroup`: `Add(workers)`, каждый воркер `defer wg.Done()`. Отдельная горутина `wg.Wait(); close(out)` закрывает выход, когда все закончили. `out` возвращайте сразу, не дожидаясь."
+solution_md: |
+  ### Идея
+
+  Fan-out: несколько воркеров читают из одного канала `in`. Канал потокобезопасен,
+  и каждое значение достаётся ровно одному воркеру, поэтому вход разбирается
+  параллельно и без дублей. Fan-in: все воркеры пишут в общий `out`.
+
+  Главная тонкость — **когда закрывать `out`**. Закрыть его должна ровно одна
+  сторона и ровно один раз, и только когда все воркеры точно завершились (иначе —
+  паника «send on closed channel» или потеря значений). Для этого используем
+  `sync.WaitGroup`: счётчик равен числу воркеров, каждый по выходе делает `Done`,
+  а отдельная горутина ждёт всех (`wg.Wait()`) и закрывает `out`. Возвращаем `out`
+  сразу, не дожидаясь завершения, — потребитель начнёт читать, пока воркеры пишут.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  func FanIn(in <-chan int, workers int, fn func(int) int) <-chan int {
+      if workers < 1 {
+          workers = 1
+      }
+      out := make(chan int)
+      var wg sync.WaitGroup
+      wg.Add(workers)
+      for w := 0; w < workers; w++ {
+          go func() {
+              defer wg.Done()
+              for v := range in {
+                  out <- fn(v)
+              }
+          }()
+      }
+      go func() {
+          wg.Wait()
+          close(out)
+      }()
+      return out
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - `close(out)` внутри воркера — другой воркер ещё пишет → паника «send on closed channel».
+  - `wg.Wait()` перед `return out` в той же горутине — дедлок: потребитель не начнёт читать `out`, воркеры не смогут отправить и не завершатся.
+  - Один общий `range in` под мьютексом — лишняя сериализация; канал и так раздаёт значения потокобезопасно.
+  - Забыть закрыть `out` при `workers < 1` — у нас закрытие делает та же горутина-закрыватель, но проверку числа воркеров стоит оставить.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "testing"
+      "time"
+  )
+
+  func TestFanInProcessesAll(t *testing.T) {
+      const n = 100
+      in := make(chan int)
+      go func() {
+          defer close(in)
+          for i := 1; i <= n; i++ {
+              in <- i
+          }
+      }()
+
+      out := FanIn(in, 4, func(x int) int { return x * x })
+
+      got := make(map[int]int)
+      done := make(chan struct{})
+      go func() {
+          for v := range out {
+              got[v]++
+          }
+          close(done)
+      }()
+      select {
+      case <-done:
+      case <-time.After(2 * time.Second):
+          t.Fatal("выходной канал не закрылся — воркеры не завершились или close(out) не вызван")
+      }
+
+      if len(got) != n {
+          t.Fatalf("получено %d различных результатов, want %d", len(got), n)
+      }
+      for i := 1; i <= n; i++ {
+          if got[i*i] != 1 {
+              t.Fatalf("результат %d получен %d раз, want 1", i*i, got[i*i])
+          }
+      }
+  }
+
+  func TestFanInRunsInParallel(t *testing.T) {
+      const workers = 4
+      in := make(chan int)
+      go func() {
+          defer close(in)
+          for i := 0; i < workers; i++ {
+              in <- i
+          }
+      }()
+      start := time.Now()
+      out := FanIn(in, workers, func(x int) int {
+          time.Sleep(40 * time.Millisecond)
+          return x
+      })
+      count := 0
+      for range out {
+          count++
+      }
+      if count != workers {
+          t.Fatalf("получено %d результатов, want %d", count, workers)
+      }
+      if elapsed := time.Since(start); elapsed > 120*time.Millisecond {
+          t.Fatalf("выполнялось %v — воркеры не работают параллельно (ожидалось ~40мс)", elapsed)
+      }
+  }

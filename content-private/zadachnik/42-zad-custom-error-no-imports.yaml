@@ -1,0 +1,61 @@
+# приватный тренажёр, банк вопросов по грейдам, личное использование
+slug: zad-custom-error-no-imports
+section: go-internals
+title: "Своя ошибка без импорта пакетов: error как интерфейс"
+difficulty: middle
+tags: [errors, interfaces, go-internals]
+question_md: |
+  Напишите функцию, которая бы возвращала ошибку, не импортируя для этого
+  никаких пакетов:
+
+  ```go
+  func main() {
+      println(handle())
+  }
+  func handle() error {
+      //...
+  }
+  ```
+answer_levels:
+  - level: middle
+    text_md: |
+      Это вопрос на знание типа `error` и понимание основ работы с
+      ошибками в Go. `error` — это встроенный интерфейс (не требует
+      импорта пакетов), а не конкретный тип: `type error interface { Error() string }`.
+  - level: senior
+    text_md: |
+      Чтобы вернуть значение типа `error` без импорта `errors` или
+      `fmt`, нужно создать свою структуру, реализующую этот интерфейс
+      (то есть имеющую метод `Error() string`), и вернуть из функции
+      экземпляр этой структуры:
+
+      ```go
+      func main() {
+          println(handle())
+      }
+      func handle() error {
+          return &customError{}
+      }
+
+      type customError struct {}
+
+      func (e *customError) Error() string {
+          return "Custom error!"
+      }
+      ```
+  - level: deep
+    text_md: |
+      Метод определён на указателе (`*customError`), поэтому именно
+      `&customError{}`, а не `customError{}`, удовлетворяет интерфейсу
+      `error` — набор методов у `T` и `*T` в Go различается: методы,
+      определённые с receiver-указателем, входят только в method set
+      `*T`. Стандартные пакеты `errors`/`fmt` (`errors.New`, `fmt.Errorf`)
+      делают ровно то же самое под капотом — оборачивают строку (и,
+      возможно, дополнительный контекст вроде обёрнутой ошибки для
+      `%w`) в свою внутреннюю структуру, реализующую `Error() string`; этот
+      вопрос проверяет, понимает ли кандидат, что `error` — не магический
+      встроенный тип с особым синтаксисом, а обычный интерфейс, который
+      можно реализовать вручную без единого импорта.
+follow_ups:
+  - "Чем отличается method set типа T от method set типа *T?"
+  - "Что делают errors.New и fmt.Errorf под капотом, если error — просто интерфейс?"

@@ -1,0 +1,113 @@
+# приватный тренажёр, личное использование
+slug: iv-library-books-many-authors
+kind: sql
+title: "Библиотека: книги, у которых больше 3 авторов"
+difficulty: middle
+tags: [join, group-by, having, many-to-many]
+statement_md: |
+  Та же схема библиотеки: `authors`, `books`, связь многие-ко-многим
+  `book_authors (book_id, author_id)`, `readers`, `loans`. Найдите книги, у
+  которых **больше 3 авторов**.
+
+  Верните два столбца: `title` — название книги и `authors` — число её
+  авторов. Отсортируйте по `authors` по убыванию, при равенстве — по `title`
+  по возрастанию.
+starter_code: |
+  -- Верните title и число авторов для книг, у которых авторов больше 3.
+  SELECT ...
+hints:
+  - "Число авторов книги — это COUNT(*) строк в book_authors для данной книги."
+  - "Соедините books с book_authors по book_id и сгруппируйте по книге (GROUP BY b.id, b.title)."
+  - "Порог на количество авторов — это HAVING COUNT(*) > 3 (условие на агрегат группы), а не WHERE."
+solution_md: |
+  ### Идея
+
+  Связь «книга — автор» хранится в таблице-стыке `book_authors`. Число
+  авторов книги — количество строк в ней с данным `book_id`. Группируем по
+  книге и оставляем группы, где авторов больше трёх, через `HAVING`.
+
+  ### Эталонный запрос
+
+  ```sql
+  SELECT b.title, COUNT(*) AS authors
+  FROM books b
+  JOIN book_authors ba ON ba.book_id = b.id
+  GROUP BY b.id, b.title
+  HAVING COUNT(*) > 3
+  ORDER BY authors DESC, b.title;
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Группировать только по `title`: при одинаковых названиях разные книги
+    склеятся — надёжнее группировать по первичному ключу `b.id`.
+  - Ставить порог в `WHERE COUNT(*) > 3` — агрегаты в `WHERE` недоступны,
+    нужен `HAVING`.
+  - Считать `COUNT(DISTINCT author_id)` без необходимости: пара
+    `(book_id, author_id)` уже уникальна (PRIMARY KEY), дублей нет.
+schema_sql: |
+  CREATE TABLE authors (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL
+  );
+  CREATE TABLE books (
+    id    INTEGER PRIMARY KEY,
+    title TEXT NOT NULL
+  );
+  CREATE TABLE book_authors (
+    book_id   INTEGER NOT NULL,
+    author_id INTEGER NOT NULL,
+    PRIMARY KEY (book_id, author_id)
+  );
+  CREATE TABLE readers (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL
+  );
+  CREATE TABLE loans (
+    id          INTEGER PRIMARY KEY,
+    book_id     INTEGER NOT NULL,
+    reader_id   INTEGER NOT NULL,
+    borrowed_at TEXT NOT NULL,
+    returned_at TEXT
+  );
+  CREATE UNIQUE INDEX ux_loans_open_book ON loans (book_id) WHERE returned_at IS NULL;
+seed_sql: |
+  INSERT INTO authors (id, name) VALUES
+    (1, 'Ivanov'),
+    (2, 'Petrova'),
+    (3, 'Sidorov'),
+    (4, 'Kim'),
+    (5, 'Lee'),
+    (6, 'Orlova');
+  INSERT INTO books (id, title) VALUES
+    (1, 'Go in Practice'),
+    (2, 'SQL Deep Dive'),
+    (3, 'Distributed Systems'),
+    (4, 'Linux Kernel'),
+    (5, 'Clean Code'),
+    (6, 'Kubernetes Internals');
+  INSERT INTO book_authors (book_id, author_id) VALUES
+    (1, 1),
+    (2, 2), (2, 3),
+    (3, 1), (3, 2), (3, 4), (3, 5),
+    (4, 6),
+    (5, 1), (5, 2), (5, 3),
+    (6, 1), (6, 2), (6, 3), (6, 6);
+  INSERT INTO readers (id, name) VALUES
+    (1, 'Anna'),
+    (2, 'Boris'),
+    (3, 'Vera');
+  INSERT INTO loans (id, book_id, reader_id, borrowed_at, returned_at) VALUES
+    (1, 1, 1, '2026-06-01', '2026-06-20'),
+    (2, 2, 2, '2026-06-05', '2026-06-25'),
+    (3, 3, 3, '2026-07-01', NULL),
+    (4, 4, 1, '2026-07-05', NULL),
+    (5, 5, 2, '2026-06-10', '2026-07-02'),
+    (6, 6, 3, '2026-07-10', NULL),
+    (7, 1, 2, '2026-07-15', NULL);
+expected:
+  columns: [title, authors]
+  rows:
+    - ["Distributed Systems", "4"]
+    - ["Kubernetes Internals", "4"]
+  order_matters: true

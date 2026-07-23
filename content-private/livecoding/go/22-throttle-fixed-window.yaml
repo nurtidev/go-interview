@@ -1,0 +1,218 @@
+# приватный тренажёр, личное использование
+slug: throttle-fixed-window
+kind: go
+title: "Ограничитель вызовов (фиксированное окно)"
+difficulty: senior
+tags: [concurrency, mutex, rate-limit]
+statement_md: |
+  Реализуйте ограничитель `Throttle`: он следит, чтобы функция `fn` выполнялась
+  не более `limit` раз за каждое окно длиной `window` (фиксированное окно).
+
+  ```go
+  func Throttle(limit int, window time.Duration, fn func()) (handle func() error, cancel func())
+  ```
+
+  Поведение `handle`:
+
+  - Первые `limit` вызовов в текущем окне выполняют `fn` и возвращают `nil`.
+  - Следующие вызовы в том же окне сразу возвращают `ErrBusy` (без вызова `fn`).
+  - С началом нового окна счётчик сбрасывается — снова доступно `limit` вызовов.
+
+  Дополнительно:
+
+  - После `cancel` любой `handle` возвращает `ErrCanceled`.
+  - `cancel` **идемпотентен** (повторные вызовы ничего не делают).
+  - `handle` и `cancel` безопасны при **одновременном** вызове из разных горутин
+    (проверяется под `-race`).
+
+  Отличие от «ограничителя скорости» (token bucket): здесь вызовы не размазываются
+  во времени — просто первые `limit` в окне проходят, остальные отклоняются до
+  конца окна.
+starter_code: |
+  package main
+
+  import (
+      "errors"
+      "time"
+  )
+
+  var (
+      ErrBusy     = errors.New("busy")
+      ErrCanceled = errors.New("canceled")
+  )
+
+  // Throttle возвращает handle и cancel. handle выполняет fn, но не более limit
+  // раз за каждое окно длиной window (фиксированное окно): первые limit вызовов в
+  // окне выполняются, остальные возвращают ErrBusy; с началом нового окна счётчик
+  // сбрасывается. После cancel handle возвращает ErrCanceled. cancel идемпотентен.
+  // handle и cancel безопасны для одновременного вызова из разных горутин.
+  func Throttle(limit int, window time.Duration, fn func()) (handle func() error, cancel func()) {
+      // TODO
+      return nil, nil
+  }
+hints:
+  - "Состояние (счётчик вызовов, начало окна, флаг отмены) разделяется между горутинами — защитите его `sync.Mutex`. Это задача про «состояние гонки», решаемая мьютексом, а не каналами/тикерами."
+  - "Окно сбрасывайте лениво прямо в `handle`: если `time.Now().Sub(winStart) >= window`, то `winStart = now; count = 0`. Не нужна фоновая горутина/тикер — а значит, `cancel` не должен ничего освобождать."
+  - "Порядок проверок под `Lock`: сперва `canceled` → `ErrCanceled`; затем сброс окна; затем `count >= limit` → `ErrBusy`; иначе `count++`. Сам `fn()` вызывайте ВНЕ критической секции, чтобы долгая `fn` не сериализовала всех."
+solution_md: |
+  ### Идея
+
+  Всё состояние — счётчик `count`, время начала окна `winStart`, флаг `canceled` —
+  общее для конкурентных `handle`/`cancel`, поэтому живёт под одним `sync.Mutex`.
+
+  Окно сбрасываем **лениво**: в начале каждого `handle` проверяем, не истекло ли
+  текущее окно (`now - winStart >= window`), и если да — открываем новое
+  (`winStart = now`, `count = 0`). Это избавляет от фоновой горутины и тикера,
+  поэтому `cancel` не освобождает ресурсов — просто выставляет флаг (и потому
+  тривиально идемпотентен).
+
+  Важный момент — `fn()` вызываем **вне** мьютекса: под блокировкой только
+  инкрементируем счётчик, а долгую `fn` выполняем уже отпустив `Lock`, иначе
+  ограничитель сериализовал бы все вызовы.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import (
+      "errors"
+      "sync"
+      "time"
+  )
+
+  var (
+      ErrBusy     = errors.New("busy")
+      ErrCanceled = errors.New("canceled")
+  )
+
+  func Throttle(limit int, window time.Duration, fn func()) (handle func() error, cancel func()) {
+      var mu sync.Mutex
+      count := 0
+      winStart := time.Now()
+      canceled := false
+
+      handle = func() error {
+          mu.Lock()
+          if canceled {
+              mu.Unlock()
+              return ErrCanceled
+          }
+          now := time.Now()
+          if now.Sub(winStart) >= window {
+              winStart = now
+              count = 0
+          }
+          if count >= limit {
+              mu.Unlock()
+              return ErrBusy
+          }
+          count++
+          mu.Unlock()
+
+          fn() // синхронно, вне критической секции
+          return nil
+      }
+
+      cancel = func() {
+          mu.Lock()
+          canceled = true
+          mu.Unlock()
+      }
+
+      return handle, cancel
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Инкремент счётчика без мьютекса — гонка, и лимит «протекает» под нагрузкой (`-race` поймает).
+  - Вызывать `fn()` под `Lock` — все вызовы выстраиваются в очередь, теряется смысл параллелизма.
+  - Заводить фоновый тикер для сброса окна и забыть его остановить в `cancel` — утечка тикера/горутины.
+  - Проверять `count >= limit` до сброса окна — на границе окна лимит срабатывает не вовремя.
+time_limit_sec: 20
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestThrottleLimitsPerWindow(t *testing.T) {
+      var runs int32
+      handle, cancel := Throttle(5, time.Hour, func() { atomic.AddInt32(&runs, 1) })
+      defer cancel()
+
+      var ok, busy int
+      for i := 0; i < 8; i++ {
+          if err := handle(); err == nil {
+              ok++
+          } else if err == ErrBusy {
+              busy++
+          } else {
+              t.Fatalf("неожиданная ошибка: %v", err)
+          }
+      }
+      if ok != 5 || busy != 3 {
+          t.Fatalf("получили ok=%d busy=%d, want ok=5 busy=3", ok, busy)
+      }
+      if runs != 5 {
+          t.Fatalf("fn выполнилась %d раз, want 5", runs)
+      }
+  }
+
+  func TestThrottleWindowResets(t *testing.T) {
+      handle, cancel := Throttle(2, 40*time.Millisecond, func() {})
+      defer cancel()
+
+      if handle() != nil || handle() != nil {
+          t.Fatal("первые 2 вызова в окне должны пройти")
+      }
+      if handle() != ErrBusy {
+          t.Fatal("3-й вызов в окне должен вернуть ErrBusy")
+      }
+      time.Sleep(60 * time.Millisecond) // новое окно
+      if err := handle(); err != nil {
+          t.Fatalf("после нового окна вызов должен пройти, получили %v", err)
+      }
+  }
+
+  func TestThrottleCancel(t *testing.T) {
+      handle, cancel := Throttle(5, time.Hour, func() {})
+      cancel()
+      cancel() // идемпотентно
+      if err := handle(); err != ErrCanceled {
+          t.Fatalf("после cancel handle должен вернуть ErrCanceled, получили %v", err)
+      }
+  }
+
+  func TestThrottleConcurrent(t *testing.T) {
+      const limit = 10
+      var runs int32
+      handle, cancel := Throttle(limit, time.Hour, func() { atomic.AddInt32(&runs, 1) })
+      defer cancel()
+
+      var wg sync.WaitGroup
+      const callers = 200
+      var okCount int32
+      wg.Add(callers)
+      for i := 0; i < callers; i++ {
+          go func() {
+              defer wg.Done()
+              if handle() == nil {
+                  atomic.AddInt32(&okCount, 1)
+              }
+          }()
+      }
+      wg.Wait()
+      if okCount != limit {
+          t.Fatalf("успешных вызовов %d, want %d (гонка на счётчике?)", okCount, limit)
+      }
+      if runs != limit {
+          t.Fatalf("fn выполнилась %d раз, want %d", runs, limit)
+      }
+  }

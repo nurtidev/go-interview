@@ -1,0 +1,176 @@
+# приватный тренажёр, личное использование
+slug: get-or-create-rwmutex
+kind: go
+title: "GetOrCreate: двойная проверка на RWMutex"
+difficulty: senior
+tags: [concurrency, rwmutex, map]
+statement_md: |
+  Реализуйте потокобезопасную карту, оптимизированную под **чтения** (их на
+  порядки больше, чем вставок).
+
+  ```go
+  func NewSafeMap() *SafeMap
+  func (m *SafeMap) GetOrCreate(key string, create func() string) string
+  ```
+
+  `GetOrCreate` возвращает значение по ключу; если ключа ещё нет — создаёт его
+  через `create()`, сохраняет и возвращает.
+
+  Требования:
+
+  - Быстрый путь (ключ уже есть) не должен блокировать других читателей — они
+    читают карту параллельно.
+  - `create()` для одного ключа вызывается **не более одного раза**, даже если в
+    него одновременно влетело много горутин.
+  - Без гонок данных на карте (проверяется под `-race`).
+starter_code: |
+  package main
+
+  import "sync"
+
+  // SafeMap — потокобезопасная карта, оптимизированная под чтения (их на порядки
+  // больше вставок). GetOrCreate возвращает значение по ключу, а если ключа нет —
+  // создаёт его через create(), сохраняет и возвращает. create для одного ключа
+  // вызывается не более одного раза, даже при конкурентных обращениях.
+  type SafeMap struct {
+      mu   sync.RWMutex
+      data map[string]string
+  }
+
+  func NewSafeMap() *SafeMap {
+      return &SafeMap{data: make(map[string]string)}
+  }
+
+  func (m *SafeMap) GetOrCreate(key string, create func() string) string {
+      // TODO
+      return ""
+  }
+hints:
+  - "Читаем много, пишем редко — берите `sync.RWMutex`. Быстрый путь: под `RLock` проверяете, есть ли ключ; читатели друг друга не блокируют, поэтому обычный `GetOrCreate` (ключ уже есть) идёт параллельно."
+  - "Если под `RLock` ключа нет — отпускаете `RLock`, берёте `Lock` и **перепроверяете** ключ (double-checked locking): пока вы шли за write-блокировкой, другая горутина могла его уже вставить."
+  - "Только если и после перепроверки ключа нет — зовёте `create()`, сохраняете и возвращаете. Перепроверка гарантирует, что `create` для ключа выполнится максимум раз."
+solution_md: |
+  ### Идея
+
+  Раз чтений намного больше вставок, берём `sync.RWMutex`: множество читателей
+  держат `RLock` одновременно и не мешают друг другу. Быстрый путь `GetOrCreate` —
+  под `RLock` посмотреть, есть ли ключ, и если есть — сразу вернуть.
+
+  Если ключа нет, переходим на медленный путь: отпускаем `RLock`, берём `Lock` и
+  **перепроверяем** наличие ключа (double-checked locking). Перепроверка
+  обязательна: между `RUnlock` и `Lock` другая горутина могла вставить этот ключ,
+  и без повторной проверки мы вызвали бы `create` дважды и затёрли чужое значение.
+  Только если ключа по-прежнему нет — зовём `create()`, сохраняем, возвращаем.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  type SafeMap struct {
+      mu   sync.RWMutex
+      data map[string]string
+  }
+
+  func NewSafeMap() *SafeMap {
+      return &SafeMap{data: make(map[string]string)}
+  }
+
+  func (m *SafeMap) GetOrCreate(key string, create func() string) string {
+      // Быстрый путь: под RLock проверяем наличие ключа (читатели не мешают друг другу).
+      m.mu.RLock()
+      v, ok := m.data[key]
+      m.mu.RUnlock()
+      if ok {
+          return v
+      }
+
+      // Медленный путь: берём write-lock и ПЕРЕПРОВЕРЯЕМ — другой мог вставить,
+      // пока мы шли за блокировкой (double-checked locking).
+      m.mu.Lock()
+      defer m.mu.Unlock()
+      if v, ok := m.data[key]; ok {
+          return v
+      }
+      v = create()
+      m.data[key] = v
+      return v
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Пропустить перепроверку под `Lock` — гонка «проверил под RLock, вставляю под Lock»: `create` вызовется дважды, значение перезапишется.
+  - Держать `RLock` и пытаться из-под него взять `Lock` — апгрейд блокировки в Go не поддерживается, будет дедлок.
+  - Обойтись обычным `Mutex` — корректно, но читатели сериализуются; при перекосе в чтения теряем главный выигрыш.
+  - Читать/писать `data` вообще без блокировки на быстром пути — гонка на map (`-race`/`fatal error: concurrent map`).
+time_limit_sec: 18
+race: true
+test_code: |
+  package main
+
+  import (
+      "fmt"
+      "sync"
+      "sync/atomic"
+      "testing"
+  )
+
+  func TestGetOrCreateCreatesOncePerKey(t *testing.T) {
+      m := NewSafeMap()
+      var creates int32
+
+      const goroutines = 100
+      results := make([]string, goroutines)
+      var wg sync.WaitGroup
+      wg.Add(goroutines)
+      for g := 0; g < goroutines; g++ {
+          go func(g int) {
+              defer wg.Done()
+              results[g] = m.GetOrCreate("k", func() string {
+                  atomic.AddInt32(&creates, 1)
+                  return "value"
+              })
+          }(g)
+      }
+      wg.Wait()
+
+      if creates != 1 {
+          t.Fatalf("create вызвана %d раз для одного ключа, want 1", creates)
+      }
+      for g := 0; g < goroutines; g++ {
+          if results[g] != "value" {
+              t.Fatalf("горутина %d получила %q, want \"value\"", g, results[g])
+          }
+      }
+  }
+
+  func TestGetOrCreateReturnsExisting(t *testing.T) {
+      m := NewSafeMap()
+      first := m.GetOrCreate("k", func() string { return "first" })
+      second := m.GetOrCreate("k", func() string { return "second" })
+      if first != "first" || second != "first" {
+          t.Fatalf("got (%q, %q), want (\"first\", \"first\")", first, second)
+      }
+  }
+
+  func TestGetOrCreateManyKeys(t *testing.T) {
+      m := NewSafeMap()
+      var wg sync.WaitGroup
+      const keys = 50
+      wg.Add(keys)
+      for k := 0; k < keys; k++ {
+          go func(k int) {
+              defer wg.Done()
+              key := fmt.Sprintf("k%d", k)
+              want := fmt.Sprintf("v%d", k)
+              got := m.GetOrCreate(key, func() string { return want })
+              if got != want {
+                  t.Errorf("ключ %s: got %q, want %q", key, got, want)
+              }
+          }(k)
+      }
+      wg.Wait()
+  }

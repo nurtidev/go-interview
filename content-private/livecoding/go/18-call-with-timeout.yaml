@@ -1,0 +1,143 @@
+# приватный тренажёр, личное использование
+slug: call-with-timeout
+kind: go
+title: "Обёртка с таймаутом над непредсказуемой функцией"
+difficulty: middle
+tags: [concurrency, time, channels]
+statement_md: |
+  Есть функция `fn`, работающая непредсказуемо долго (представьте сетевой вызов)
+  и возвращающая число. Напишите обёртку `CallWithTimeout`, которая запускает
+  `fn` с фиксированным таймаутом.
+
+  ```go
+  func CallWithTimeout(timeout time.Duration, fn func() int) (int, error)
+  ```
+
+  - Если `fn` успела за `timeout` — верните её результат и `nil`.
+  - Если не успела — верните `(0, ErrTimeout)`; сам результат в этом случае не
+    важен.
+
+  Требования:
+
+  - После таймаута горутина, выполняющая `fn`, **не должна утекать** — даже если
+    `fn` завершится сильно позже, её горутина обязана спокойно доработать и выйти.
+  - Без гонок (`-race`).
+starter_code: |
+  package main
+
+  import (
+      "errors"
+      "time"
+  )
+
+  // ErrTimeout возвращается, если fn не успела отработать за отведённое время.
+  var ErrTimeout = errors.New("timeout")
+
+  // CallWithTimeout запускает fn и ждёт результат не дольше timeout.
+  // Если fn успела — возвращает (результат, nil); иначе (0, ErrTimeout).
+  // Горутина с fn не должна утекать даже при таймауте.
+  func CallWithTimeout(timeout time.Duration, fn func() int) (int, error) {
+      // TODO
+      return 0, nil
+  }
+hints:
+  - "`fn` нельзя прервать снаружи, поэтому запускаем её в отдельной горутине и через `select` ждём либо её результат из канала, либо `<-time.After(timeout)`."
+  - "Ключевая деталь — сделать канал результата **буферизованным** (`make(chan int, 1)`). Тогда даже после таймаута, когда мы уже вернулись и никто не читает, горутина сможет отправить результат и завершиться, а не зависнуть на отправке."
+  - "На небуферизованном канале при таймауте горутина `fn` навсегда застрянет на `ch <- fn()` — классическая утечка. Буфер на 1 её спасает."
+solution_md: |
+  ### Идея
+
+  `fn` непрерываема, поэтому «таймаут» реализуем не отменой `fn`, а тем, что
+  **перестаём её ждать**. Запускаем `fn` в горутине, а в `select` соревнуются два
+  события: результат пришёл (`<-ch`) или истёк таймер (`<-time.After(timeout)`).
+  Что раньше — то и определяет исход.
+
+  Тонкость — не оставить утечку. После таймаута мы возвращаемся, и читать `ch`
+  больше некому. Если бы `ch` был небуферизованным, горутина навсегда застряла бы
+  на `ch <- fn()`. Поэтому канал буферизуем ёмкостью 1: отправка результата
+  проходит без читателя, горутина спокойно завершается, память освобождается.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import (
+      "errors"
+      "time"
+  )
+
+  var ErrTimeout = errors.New("timeout")
+
+  func CallWithTimeout(timeout time.Duration, fn func() int) (int, error) {
+      ch := make(chan int, 1) // буфер 1: fn всегда сможет отправить результат и завершиться
+      go func() {
+          ch <- fn()
+      }()
+      select {
+      case v := <-ch:
+          return v, nil
+      case <-time.After(timeout):
+          return 0, ErrTimeout
+      }
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Небуферизованный `ch` — при таймауте горутина `fn` зависает на отправке навсегда (утечка).
+  - Пытаться «убить» горутину `fn` — в Go горутину нельзя прервать извне; можно только перестать её ждать.
+  - Общая переменная результата без синхронизации вместо канала — гонка между горутиной `fn` и возвратом обёртки.
+  - Создавать `time.After` внутри цикла опроса — лишние таймеры; здесь достаточно одного `select`.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "runtime"
+      "testing"
+      "time"
+  )
+
+  func TestCallWithTimeoutFast(t *testing.T) {
+      v, err := CallWithTimeout(200*time.Millisecond, func() int { return 42 })
+      if err != nil {
+          t.Fatalf("неожиданная ошибка: %v", err)
+      }
+      if v != 42 {
+          t.Fatalf("получено %d, want 42", v)
+      }
+  }
+
+  func TestCallWithTimeoutSlow(t *testing.T) {
+      _, err := CallWithTimeout(50*time.Millisecond, func() int {
+          time.Sleep(500 * time.Millisecond)
+          return 1
+      })
+      if err != ErrTimeout {
+          t.Fatalf("ожидали ErrTimeout, получили %v", err)
+      }
+  }
+
+  func TestCallWithTimeoutNoLeak(t *testing.T) {
+      base := runtime.NumGoroutine()
+      for i := 0; i < 50; i++ {
+          _, _ = CallWithTimeout(10*time.Millisecond, func() int {
+              time.Sleep(60 * time.Millisecond)
+              return 1
+          })
+      }
+      time.Sleep(200 * time.Millisecond)
+      ok := false
+      for i := 0; i < 200; i++ {
+          if runtime.NumGoroutine() <= base+2 {
+              ok = true
+              break
+          }
+          time.Sleep(10 * time.Millisecond)
+      }
+      if !ok {
+          t.Fatalf("горутины утекли: было %d, стало %d (небуферизованный канал держит fn?)", base, runtime.NumGoroutine())
+      }
+  }

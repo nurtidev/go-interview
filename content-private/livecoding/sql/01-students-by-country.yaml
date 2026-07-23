@@ -1,0 +1,79 @@
+# приватный тренажёр, личное использование
+slug: iv-students-by-country
+kind: sql
+title: "Страны с числом студентов выше порога (кроме одной)"
+difficulty: middle
+tags: [group-by, having, filter]
+statement_md: |
+  Есть таблица студентов `students (id, name, country)`. Найдите страны, из
+  которых учится **больше 3** студентов, **исключив** студентов из Китая
+  (`China`).
+
+  Верните два столбца: `country` — страна и `cnt` — количество студентов.
+  Отсортируйте по `cnt` по убыванию; при равенстве — по `country` по
+  возрастанию.
+starter_code: |
+  -- Верните country и cnt для стран с числом студентов > 3, кроме China.
+  SELECT ...
+hints:
+  - "Сначала отбросьте студентов из Китая обычным условием в WHERE (country <> 'China') — фильтрация отдельных строк идёт до группировки."
+  - "Сгруппируйте оставшиеся строки по стране (GROUP BY country) и посчитайте COUNT(*) в каждой группе."
+  - "Условие на количество в группе — это HAVING COUNT(*) > 3, а не WHERE: WHERE не видит агрегатов. Отсортируйте по cnt DESC, country."
+solution_md: |
+  ### Идея
+
+  Порядок логической обработки запроса: `WHERE` фильтрует отдельные строки
+  **до** группировки, `GROUP BY` собирает строки в группы, `HAVING`
+  фильтрует уже готовые группы по агрегату. Поэтому исключение Китая —
+  построчный фильтр (`WHERE`), а порог по количеству — фильтр групп
+  (`HAVING`).
+
+  ### Эталонный запрос
+
+  ```sql
+  SELECT country, COUNT(*) AS cnt
+  FROM students
+  WHERE country <> 'China'
+  GROUP BY country
+  HAVING COUNT(*) > 3
+  ORDER BY cnt DESC, country;
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Пытаться отфильтровать `China` в `HAVING` — работает, но семантически
+    это построчное условие, его место в `WHERE` (и так эффективнее — строки
+    отсеиваются до агрегации).
+  - Написать `WHERE COUNT(*) > 3` — синтаксическая ошибка, агрегаты в `WHERE`
+    недоступны.
+  - Забыть вторичную сортировку по `country` — при равных `cnt` порядок
+    недетерминирован.
+schema_sql: |
+  CREATE TABLE students (
+    id      INTEGER PRIMARY KEY,
+    name    TEXT NOT NULL,
+    country TEXT NOT NULL
+  );
+seed_sql: |
+  INSERT INTO students (id, name, country) VALUES
+    (1,  'Aidar',  'Kazakhstan'),
+    (2,  'Bekzat', 'Kazakhstan'),
+    (3,  'Dana',   'Kazakhstan'),
+    (4,  'Erlan',  'Kazakhstan'),
+    (5,  'Gulnaz', 'Kazakhstan'),
+    (6,  'Arjun',  'India'),
+    (7,  'Priya',  'India'),
+    (8,  'Rohit',  'India'),
+    (9,  'Sunita', 'India'),
+    (10, 'Wei',    'China'),
+    (11, 'Li',     'China'),
+    (12, 'Chen',   'China'),
+    (13, 'Mei',    'China'),
+    (14, 'Ivan',   'Russia'),
+    (15, 'Olga',   'Russia');
+expected:
+  columns: [country, cnt]
+  rows:
+    - ["Kazakhstan", "5"]
+    - ["India", "4"]
+  order_matters: true

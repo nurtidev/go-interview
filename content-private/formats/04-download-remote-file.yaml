@@ -1,0 +1,77 @@
+# приватный тренажёр, личное использование
+slug: iv-download-remote-file
+section: platform
+title: "Скачать файл с удалённой машины за бастионом"
+difficulty: middle
+tags: [linux, scp, ssh]
+question_md: |
+  Тот же контур сети: ваша `computer` -> bastion -> удалённая машина
+  `remote`, где лежит нужный файл (например, `/var/log/nginx/access.log`).
+  Прямого доступа к `remote` нет. Как скачать этот файл к себе? Приведите
+  команды и объясните варианты.
+answer_levels:
+  - level: middle
+    text_md: |
+      Если бы доступ к `remote` был прямой, хватило бы `scp`:
+
+      ```bash
+      scp user@remote:/var/log/nginx/access.log ./access.log
+      ```
+
+      Раз прямого доступа нет, `scp` умеет ходить через jump-хост тем же
+      флагом `-J`, что и ssh:
+
+      ```bash
+      scp -J user@bastion user@remote:/var/log/nginx/access.log ./access.log
+      ```
+
+      Файл скопируется на локальную машину через bastion.
+  - level: senior
+    text_md: |
+      Полезные альтернативы и нюансы:
+
+      - **`rsync` через ssh** — лучше для больших/докачиваемых файлов:
+        поддерживает докачку (`--partial`), сжатие (`-z`), прогресс
+        (`--progress`) и не гонит уже переданное:
+
+        ```bash
+        rsync -avz --partial -e 'ssh -J user@bastion' \
+          user@remote:/var/log/nginx/access.log ./
+        ```
+
+      - **Через `~/.ssh/config`.** Если для `remote` прописан
+        `ProxyJump bastion`, то `scp user@remote:/path .` и
+        `rsync ... user@remote:/path .` работают без явного `-J`.
+
+      - **Большой лог лучше сжать на источнике** и тянуть поток по ssh:
+
+        ```bash
+        ssh -J user@bastion user@remote 'gzip -c /var/log/nginx/access.log' \
+          > access.log.gz
+        ```
+
+        Так экономится трафик, а на конце просто `gunzip`.
+  - level: deep
+    text_md: |
+      Тонкости:
+
+      - **`scp` vs `sftp` vs `rsync`.** Классический `scp`-протокол считается
+        устаревшим (OpenSSH переводит `scp` на работу поверх SFTP); для
+        скриптов и надёжной докачки предпочитают `rsync` или `sftp`.
+      - **Права на чтение лога.** `/var/log/nginx/*` часто принадлежит root и
+        закрыт для обычного пользователя — понадобится либо член группы
+        `adm`, либо `sudo`. Через `scp` `sudo` не сделать напрямую; обходят
+        через `ssh ... 'sudo cat file' > local` или временную копию с
+        доступными правами.
+      - **Целостность.** Для важных файлов сверяют контрольную сумму:
+        `ssh remote sha256sum file` и локально `sha256sum`.
+      - **Только stdout, без временных файлов.** Поток
+        `ssh remote 'cat file' > local` полезен, когда на удалённой стороне
+        нет места под промежуточную копию или файл нельзя класть на диск.
+      - **Направление.** `scp -J ... user@remote:/path .` — скачать; поменяв
+        аргументы местами, тем же `-J` можно и загрузить файл на `remote`.
+follow_ups:
+  - "Чем rsync выгоднее scp при переносе больших или часто меняющихся файлов?"
+  - "Как скачать файл, который читается только под root, не открывая root-логин по ssh?"
+  - "Как проверить, что файл скачался без повреждений?"
+  - "Почему scp-протокол считают устаревшим и что рекомендуют вместо него?"

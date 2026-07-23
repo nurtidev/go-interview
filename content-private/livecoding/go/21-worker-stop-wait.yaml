@@ -1,0 +1,192 @@
+# приватный тренажёр, личное использование
+slug: worker-stop-wait
+kind: go
+title: "Работяга: Start / Stop / Wait"
+difficulty: senior
+tags: [concurrency, waitgroup, lifecycle]
+statement_md: |
+  Реализуйте тип `Worker`, который циклически выполняет заданную функцию в
+  отдельной горутине и умеет корректно останавливаться.
+
+  ```go
+  func NewWorker(fn func() error) *Worker
+  func (w *Worker) Start()   // запускает рабочий цикл в горутине
+  func (w *Worker) Stop()    // просит остановиться (идемпотентно)
+  func (w *Worker) Wait()    // блокирует, пока горутина воркера не завершится
+  ```
+
+  Рабочий цикл повторяет `fn()`, пока не выполнится одно из:
+
+  - `fn` вернула ошибку — цикл завершается сам;
+  - вызван `Stop()` — цикл завершается на следующей проверке.
+
+  Требования:
+
+  - `Stop()` можно вызывать несколько раз (в т.ч. из другой горутины) — **без
+    паники**, останавливает по первому вызову.
+  - `Wait()` разблокируется ровно тогда, когда горутина воркера действительно
+    вышла.
+  - Без гонок (`-race`).
+starter_code: |
+  package main
+
+  // Worker циклически выполняет fn в отдельной горутине, пока fn не вернёт ошибку
+  // или пока не будет вызван Stop. Stop идемпотентен, Wait блокирует вызывающего,
+  // пока горутина воркера не завершится.
+  type Worker struct {
+      fn func() error
+      // TODO: состояние для Stop и Wait
+  }
+
+  func NewWorker(fn func() error) *Worker {
+      return &Worker{fn: fn}
+  }
+
+  // Start запускает рабочий цикл в отдельной горутине.
+  func (w *Worker) Start() {
+      // TODO
+  }
+
+  // Stop останавливает воркера; повторные вызовы безопасны.
+  func (w *Worker) Stop() {
+      // TODO
+  }
+
+  // Wait блокирует, пока горутина воркера не завершится.
+  func (w *Worker) Wait() {
+      // TODO
+  }
+hints:
+  - "`Wait` — это `sync.WaitGroup`: в `Start` делаете `wg.Add(1)`, горутина `defer wg.Done()`, а `Wait()` — `wg.Wait()`. Так вызывающий блокируется до реального выхода горутины."
+  - "`Stop` — сигнал через закрытие канала `done`. В цикле перед `fn()` проверяйте `select { case <-w.done: return; default: }`. Идемпотентность закрытия обеспечивает `sync.Once`."
+  - "Не держите блокировок во время `fn()` — она может быть долгой. Достаточно неблокирующей проверки `done` в начале каждой итерации; `fn` может отработать ещё раз после `Stop` — это нормально."
+solution_md: |
+  ### Идея
+
+  Три метода — три разных механизма. `Start` запускает горутину с циклом `fn()`.
+  `Stop` — сигнал остановки: закрываем канал `done`, а в цикле перед каждым `fn()`
+  делаем неблокирующую проверку `select { case <-done: return; default: }`.
+  `sync.Once` гарантирует, что повторные `Stop()` не уронят «close of closed
+  channel».
+
+  `Wait` строится на `sync.WaitGroup`: `Add(1)` в `Start`, `defer Done()` в
+  горутине — тогда `wg.Wait()` разблокируется точно в момент выхода горутины (не
+  раньше). Цикл завершается либо по `done`, либо когда сама `fn` вернула ошибку.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  type Worker struct {
+      fn       func() error
+      done     chan struct{}
+      wg       sync.WaitGroup
+      stopOnce sync.Once
+  }
+
+  func NewWorker(fn func() error) *Worker {
+      return &Worker{fn: fn, done: make(chan struct{})}
+  }
+
+  func (w *Worker) Start() {
+      w.wg.Add(1)
+      go func() {
+          defer w.wg.Done()
+          for {
+              select {
+              case <-w.done:
+                  return
+              default:
+              }
+              if err := w.fn(); err != nil {
+                  return
+              }
+          }
+      }()
+  }
+
+  func (w *Worker) Stop() {
+      w.stopOnce.Do(func() {
+          close(w.done)
+      })
+  }
+
+  func (w *Worker) Wait() {
+      w.wg.Wait()
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - `close(done)` без `sync.Once` — второй `Stop()` паникует «close of closed channel».
+  - Реализовать `Wait` через опрос флага в цикле — busy-waiting и гонка на флаге.
+  - `wg.Add(1)` внутри горутины, а не в `Start` до её запуска — гонка: `Wait()` может проскочить до `Add`.
+  - Проверять `done` только блокирующим `<-w.done` без `default` — цикл встанет и `fn` больше не вызовется.
+time_limit_sec: 18
+race: true
+test_code: |
+  package main
+
+  import (
+      "errors"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestWorkerStopHalts(t *testing.T) {
+      var count int32
+      w := NewWorker(func() error {
+          atomic.AddInt32(&count, 1)
+          time.Sleep(5 * time.Millisecond)
+          return nil
+      })
+      w.Start()
+      time.Sleep(50 * time.Millisecond)
+      w.Stop()
+      w.Wait()
+
+      after := atomic.LoadInt32(&count)
+      if after == 0 {
+          t.Fatal("fn ни разу не выполнилась")
+      }
+      time.Sleep(50 * time.Millisecond)
+      if atomic.LoadInt32(&count) != after {
+          t.Fatalf("fn продолжила выполняться после Stop+Wait: было %d, стало %d", after, atomic.LoadInt32(&count))
+      }
+  }
+
+  func TestWorkerStopsOnError(t *testing.T) {
+      var count int32
+      w := NewWorker(func() error {
+          n := atomic.AddInt32(&count, 1)
+          if n == 3 {
+              return errors.New("done")
+          }
+          return nil
+      })
+      w.Start()
+
+      done := make(chan struct{})
+      go func() { w.Wait(); close(done) }()
+      select {
+      case <-done:
+      case <-time.After(2 * time.Second):
+          t.Fatal("Wait() не разблокировался после завершения fn по ошибке")
+      }
+      if atomic.LoadInt32(&count) != 3 {
+          t.Fatalf("fn выполнилась %d раз, want 3", atomic.LoadInt32(&count))
+      }
+  }
+
+  func TestWorkerStopIdempotent(t *testing.T) {
+      w := NewWorker(func() error { return nil })
+      w.Start()
+      w.Stop()
+      w.Stop() // не должно паниковать
+      w.Stop()
+      w.Wait()
+  }

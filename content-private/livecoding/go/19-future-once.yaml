@@ -1,0 +1,168 @@
+# приватный тренажёр, личное использование
+slug: future-once
+kind: go
+title: "Одноразовый Future (Set/Get)"
+difficulty: middle
+tags: [concurrency, channels, sync]
+statement_md: |
+  Реализуйте одноразовый **Future** — «обещанный результат», который сначала
+  ждут, потом однажды устанавливают.
+
+  ```go
+  func NewFuture() *Future
+  func (f *Future) Set(v int)
+  func (f *Future) Get() int
+  ```
+
+  - `Get()` **блокирует** всех вызывающих, пока не будет вызван `Set`. После
+    `Set` любой `Get` (в том числе будущий) немедленно отдаёт установленное
+    значение.
+  - `Set` можно вызвать несколько раз и из разных горутин — **побеждает первый**,
+    остальные вызовы игнорируются (без паники).
+
+  Требования: без гонок и без busy-waiting (проверяется под `-race`). `Get` могут
+  одновременно звать много горутин — все должны получить одно и то же значение.
+starter_code: |
+  package main
+
+  // Future — одноразовый «обещанный результат». Get блокирует всех вызывающих,
+  // пока не будет вызван Set; после Set любой Get (в т.ч. будущий) сразу отдаёт
+  // значение. Первый Set побеждает, остальные игнорируются.
+  type Future struct {
+      // TODO
+  }
+
+  func NewFuture() *Future {
+      // TODO
+      return &Future{}
+  }
+
+  // Set задаёт результат ровно один раз.
+  func (f *Future) Set(v int) {
+      // TODO
+  }
+
+  // Get блокирует, пока результат не задан, затем возвращает его.
+  func (f *Future) Get() int {
+      // TODO
+      return 0
+  }
+hints:
+  - "Блокировка без busy-waiting — это ожидание на канале. Заведите `done chan struct{}`: `Get` делает `<-done` (ждёт, пока канал не закроют), затем возвращает значение."
+  - "`Set` записывает значение и закрывает `done` — закрытие широковещательно разблокирует всех, кто висит на `<-done` (сколько бы `Get` ни ждало)."
+  - "«Побеждает первый» и защита от повторного `close` — это `sync.Once`: заворачиваете `f.val = v; close(f.done)` в `once.Do(...)`. Значение пишется до `close`, читается после `<-done` — гонки нет (happens-before)."
+solution_md: |
+  ### Идея
+
+  Future = «значение + сигнал готовности». Сигнал даёт закрытие канала `done`:
+  `Get` висит на `<-done` (блокировка без траты процессора), а закрытие канала
+  мгновенно и широковещательно разблокирует всех ожидающих. После закрытия
+  `<-done` не блокирует, поэтому будущие `Get` возвращаются сразу.
+
+  «Первый `Set` побеждает» и защита от повторного `close` (иначе паника «close of
+  closed channel») — это ровно задача `sync.Once`. Значение `val` записывается
+  **до** `close(done)`, а читается **после** `<-done`; закрытие канала
+  устанавливает happens-before, поэтому чтение `val` безопасно и `-race` чист.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  type Future struct {
+      done chan struct{}
+      once sync.Once
+      val  int
+  }
+
+  func NewFuture() *Future {
+      return &Future{done: make(chan struct{})}
+  }
+
+  func (f *Future) Set(v int) {
+      f.once.Do(func() {
+          f.val = v
+          close(f.done)
+      })
+  }
+
+  func (f *Future) Get() int {
+      <-f.done
+      return f.val
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - `close(f.done)` без `sync.Once` — второй `Set` роняет «close of closed channel».
+  - Отправка `done <- struct{}{}` вместо `close` — разблокирует лишь одного ожидающего, а нужно всех сразу.
+  - Читать `val` без ожидания сигнала (`bool`-флаг + busy-loop) — гонка на `val` и трата процессора.
+  - Писать `val` после `close(done)` — гонка: кто-то уже прочитал `val` по разблокировке.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "testing"
+      "time"
+  )
+
+  func TestFutureGetBlocksUntilSet(t *testing.T) {
+      f := NewFuture()
+      const readers = 20
+      got := make([]int, readers)
+      var wg sync.WaitGroup
+      wg.Add(readers)
+      for i := 0; i < readers; i++ {
+          go func(i int) {
+              defer wg.Done()
+              got[i] = f.Get()
+          }(i)
+      }
+
+      time.Sleep(30 * time.Millisecond) // дать читателям заблокироваться
+      f.Set(42)
+
+      done := make(chan struct{})
+      go func() { wg.Wait(); close(done) }()
+      select {
+      case <-done:
+      case <-time.After(2 * time.Second):
+          t.Fatal("Get() не разблокировался после Set()")
+      }
+      for i := 0; i < readers; i++ {
+          if got[i] != 42 {
+              t.Fatalf("reader %d получил %d, want 42", i, got[i])
+          }
+      }
+  }
+
+  func TestFutureFirstSetWins(t *testing.T) {
+      f := NewFuture()
+      var wg sync.WaitGroup
+      wg.Add(2)
+      go func() { defer wg.Done(); f.Set(1) }()
+      go func() { defer wg.Done(); f.Set(2) }()
+      wg.Wait()
+      v := f.Get()
+      if v != 1 && v != 2 {
+          t.Fatalf("Get() вернул %d, ожидали 1 или 2", v)
+      }
+      for i := 0; i < 5; i++ {
+          if again := f.Get(); again != v {
+              t.Fatalf("Get() нестабилен: %d затем %d", v, again)
+          }
+      }
+  }
+
+  func TestFutureGetAfterSet(t *testing.T) {
+      f := NewFuture()
+      f.Set(7)
+      if v := f.Get(); v != 7 {
+          t.Fatalf("Get() после Set() вернул %d, want 7", v)
+      }
+  }

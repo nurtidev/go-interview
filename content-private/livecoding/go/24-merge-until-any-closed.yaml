@@ -1,0 +1,200 @@
+# приватный тренажёр, личное использование
+slug: merge-until-any-closed
+kind: go
+title: "Merge N каналов с остановкой по первому закрытию"
+difficulty: senior
+tags: [concurrency, channels, fan-in]
+statement_md: |
+  Реализуйте вариант fan-in `Merge`: он сливает значения из входных каналов в
+  один выходной, но **как только любой из входов закрывается**, прекращает
+  пересылку и закрывает выход.
+
+  ```go
+  func Merge(chs ...<-chan int) <-chan int
+  ```
+
+  Дано: несколько входных каналов. Верните выходной канал со значениями входов.
+  Отличие от обычного fan-in: обычный ждёт закрытия **всех** входов, а этот
+  останавливается по **первому** закрывшемуся входу.
+
+  Требования:
+
+  - Выходной канал закрывается ровно один раз — когда закрылся любой из входов
+    (иначе потребитель на `for v := range out` зависнет).
+  - Никаких паник «send on closed channel» и никаких утечек горутин: все
+    пересылающие горутины должны завершиться.
+  - Проверяется под `-race`.
+starter_code: |
+  package main
+
+  // Merge сливает значения из входных каналов в один выходной. Как только ЛЮБОЙ из
+  // входов закрывается, Merge перестаёт пересылать значения и закрывает выход
+  // (ровно один раз). Горутины не должны утекать.
+  func Merge(chs ...<-chan int) <-chan int {
+      // TODO
+      return nil
+  }
+hints:
+  - "На каждый вход — своя пересылающая горутина. Заведите общий сигнальный канал `quit`: когда какая-то горутина обнаружит `ok == false` (её вход закрыт), она закрывает `quit` через `sync.Once` (ровно один раз)."
+  - "Каждая горутина слушает `quit` во всех блокирующих операциях: и на приёме из своего входа, и на отправке в `out` (вложенный `select { case out <- v: case <-quit: return }`). Иначе при остановке горутина зависнет на отправке."
+  - "Выход `out` закрывает отдельная горутина-закрыватель после `wg.Wait()` — так `close(out)` случится строго после того, как все пересылающие горутины перестали писать (нет паники «send on closed channel»)."
+solution_md: |
+  ### Идея
+
+  Тот же fan-in, но с общим сигналом остановки `quit`. Каждый вход обслуживает
+  своя горутина. Когда любая из них видит, что её вход закрыт (`ok == false`), она
+  закрывает `quit` — через `sync.Once`, чтобы это случилось ровно раз.
+
+  Закрытие `quit` — широковещательный сигнал: все горутины во всех своих
+  блокирующих `select`-ветках имеют `case <-quit: return`, поэтому и на ожидании
+  входа, и **на отправке в `out`** они мгновенно выходят (иначе застряли бы на
+  `out <- v`, если потребитель уже не читает).
+
+  `out` закрывает отдельная горутина после `wg.Wait()` — гарантия, что закрытие
+  произойдёт строго после того, как ни одна пересылающая горутина больше не пишет,
+  так что паники «send on closed channel» быть не может.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  func Merge(chs ...<-chan int) <-chan int {
+      out := make(chan int)
+      quit := make(chan struct{})
+      var quitOnce sync.Once
+      triggerQuit := func() { quitOnce.Do(func() { close(quit) }) }
+
+      var wg sync.WaitGroup
+      wg.Add(len(chs))
+      for _, ch := range chs {
+          go func(c <-chan int) {
+              defer wg.Done()
+              for {
+                  select {
+                  case v, ok := <-c:
+                      if !ok {
+                          triggerQuit() // этот вход закрылся — сигнал остановки
+                          return
+                      }
+                      select {
+                      case out <- v:
+                      case <-quit:
+                          return
+                      }
+                  case <-quit:
+                      return
+                  }
+              }
+          }(ch)
+      }
+
+      go func() {
+          wg.Wait()
+          close(out)
+      }()
+      return out
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Отправлять `out <- v` без вложенного `select { ... case <-quit }` — при остановке горутина зависнет на отправке (утечка, `-race` её не видит).
+  - Закрывать `out` прямо в пересылающей горутине — другая ещё пишет → паника «send on closed channel».
+  - `close(quit)` без `sync.Once` — вторая закрывшаяся горутина уронит «close of closed channel».
+  - Захватить `ch` замыканием без параметра — на Go ≤ 1.21 все горутины читают последний канал.
+time_limit_sec: 20
+race: true
+test_code: |
+  package main
+
+  import (
+      "runtime"
+      "testing"
+      "time"
+  )
+
+  func TestMergeForwardsThenClosesOnInputClose(t *testing.T) {
+      a := make(chan int)
+      b := make(chan int) // остаётся открытым, ничего не шлёт
+
+      out := Merge(a, b)
+
+      go func() {
+          a <- 1
+          a <- 2
+          a <- 3
+          close(a)
+      }()
+
+      got := []int{}
+      done := make(chan struct{})
+      go func() {
+          for v := range out {
+              got = append(got, v)
+          }
+          close(done)
+      }()
+
+      select {
+      case <-done:
+      case <-time.After(2 * time.Second):
+          t.Fatal("выход не закрылся после закрытия входного канала a")
+      }
+
+      // отправка блокирует пересылающую горутину до приёма потребителем,
+      // поэтому все три значения гарантированно доставлены до закрытия a.
+      if len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+          t.Fatalf("получено %v, want [1 2 3]", got)
+      }
+      _ = b
+  }
+
+  func TestMergeClosesImmediatelyIfInputAlreadyClosed(t *testing.T) {
+      a := make(chan int)
+      close(a) // уже закрыт
+      b := make(chan int)
+
+      out := Merge(a, b)
+      select {
+      case _, ok := <-out:
+          if ok {
+              t.Fatal("ожидали закрытый выход (один вход изначально закрыт)")
+          }
+      case <-time.After(2 * time.Second):
+          t.Fatal("выход не закрылся, хотя один вход изначально закрыт")
+      }
+      _ = b
+  }
+
+  func TestMergeNoLeak(t *testing.T) {
+      base := runtime.NumGoroutine()
+      a := make(chan int)
+      b := make(chan int)
+      c := make(chan int)
+      out := Merge(a, b, c)
+
+      go func() {
+          a <- 10
+          close(a) // закрытие a должно остановить весь merge
+      }()
+
+      for range out {
+      }
+
+      ok := false
+      for i := 0; i < 200; i++ {
+          if runtime.NumGoroutine() <= base+1 {
+              ok = true
+              break
+          }
+          time.Sleep(10 * time.Millisecond)
+      }
+      if !ok {
+          t.Fatalf("горутины утекли: было %d, стало %d", base, runtime.NumGoroutine())
+      }
+      _ = b
+      _ = c
+  }

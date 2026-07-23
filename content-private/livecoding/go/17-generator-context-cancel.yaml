@@ -1,0 +1,151 @@
+# приватный тренажёр, личное использование
+slug: generator-context-cancel
+kind: go
+title: "Генератор с отменой по context (без утечки)"
+difficulty: middle
+tags: [concurrency, context, channels]
+statement_md: |
+  Реализуйте бесконечный генератор чисел, управляемый через `context.Context`.
+
+  ```go
+  func Generate(ctx context.Context, start int) <-chan int
+  ```
+
+  Дано: контекст `ctx` и начальное число `start`. Верните канал, в который
+  горутина пишет `start`, `start+1`, `start+2`, … — пока потребитель читает.
+  Как только `ctx` отменён, горутина должна завершиться, а канал — закрыться.
+
+  Требования:
+
+  - Никакого busy-waiting: отправка значения и проверка отмены — через `select`.
+  - После отмены горутина **не должна утекать** (проверяется по числу горутин).
+  - Потребитель может прекратить читать в любой момент, отменив `ctx`.
+
+  Пример: `ctx` с отменой, читаем `11 12 13 14 15`, затем прерываем цикл и
+  вызываем `cancel()` — горутина генератора завершается, канал закрывается.
+starter_code: |
+  package main
+
+  import "context"
+
+  // Generate возвращает канал, в который бесконечно пишет start, start+1, ...
+  // пока не будет отменён ctx. При отмене горутина завершается, а канал
+  // закрывается (без утечки горутины).
+  func Generate(ctx context.Context, start int) <-chan int {
+      // TODO
+      return nil
+  }
+hints:
+  - "Бесконечный `for i := start; ; i++` в горутине не должен слепо писать `out <- i` — если потребитель перестал читать после отмены, отправка зависнет навсегда (утечка). Нужен `select`."
+  - "В `select` две ветки: `case out <- i:` (значение отправлено, идём дальше) и `case <-ctx.Done(): return` (отмена — выходим). Так горутина не залипнет на отправке."
+  - "`defer close(out)` в начале горутины гарантирует закрытие канала при любом выходе (в т.ч. по отмене) — потребитель на `range`/`<-out` увидит закрытие."
+solution_md: |
+  ### Идея
+
+  Генератор — это горутина с бесконечным циклом, которая пишет очередное число в
+  канал. Проблема бесконечных генераторов — **утечка**: если потребитель перестал
+  читать (например, отменил контекст и вышел из цикла), голая отправка `out <- i`
+  заблокируется навсегда, и горутина повиснет.
+
+  Решение — на отправку вешаем `select` с веткой `<-ctx.Done()`: либо значение
+  уходит в канал, либо приходит отмена и мы выходим. `defer close(out)` закрывает
+  канал при любом завершении горутины, так что потребитель корректно увидит конец
+  потока. Ровно этот приём («от канала отмены к контексту») лежит в основе всех
+  cancelable-конвейеров.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "context"
+
+  func Generate(ctx context.Context, start int) <-chan int {
+      out := make(chan int)
+      go func() {
+          defer close(out)
+          for i := start; ; i++ {
+              select {
+              case out <- i:
+              case <-ctx.Done():
+                  return
+              }
+          }
+      }()
+      return out
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - `out <- i` без `select` — при отмене, когда потребитель ушёл, горутина навсегда зависнет на отправке (утечка; `-race` её не покажет).
+  - Проверять отмену только в начале итерации (`if ctx.Err() != nil`), а отправлять безусловно — гонка окна: отмена придёт во время блокирующей отправки.
+  - Не закрывать `out` — потребитель на `range out` зависнет после отмены.
+  - Читать `ctx.Done()` вне цикла один раз — отмена, пришедшая позже, не заметится.
+time_limit_sec: 15
+race: true
+test_code: |
+  package main
+
+  import (
+      "context"
+      "runtime"
+      "testing"
+      "time"
+  )
+
+  func TestGenerateSequence(t *testing.T) {
+      ctx, cancel := context.WithCancel(context.Background())
+      defer cancel()
+      gen := Generate(ctx, 11)
+      want := []int{11, 12, 13, 14, 15}
+      for _, w := range want {
+          select {
+          case v := <-gen:
+              if v != w {
+                  t.Fatalf("получено %d, want %d", v, w)
+              }
+          case <-time.After(time.Second):
+              t.Fatal("генератор не выдал очередное значение")
+          }
+      }
+  }
+
+  func TestGenerateCancelClosesAndNoLeak(t *testing.T) {
+      base := runtime.NumGoroutine()
+      ctx, cancel := context.WithCancel(context.Background())
+      gen := Generate(ctx, 0)
+      for i := 0; i < 5; i++ {
+          select {
+          case <-gen:
+          case <-time.After(time.Second):
+              t.Fatal("генератор не выдал значение до отмены")
+          }
+      }
+      cancel()
+
+      closed := false
+      deadline := time.After(2 * time.Second)
+      for !closed {
+          select {
+          case _, ok := <-gen:
+              if !ok {
+                  closed = true
+              }
+          case <-deadline:
+              t.Fatal("канал не закрылся после отмены ctx")
+          }
+      }
+
+      ok := false
+      for i := 0; i < 200; i++ {
+          if runtime.NumGoroutine() <= base {
+              ok = true
+              break
+          }
+          time.Sleep(10 * time.Millisecond)
+      }
+      if !ok {
+          t.Fatalf("горутина генератора не завершилась после отмены: было %d, стало %d", base, runtime.NumGoroutine())
+      }
+  }

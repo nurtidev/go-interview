@@ -1,0 +1,187 @@
+# приватный тренажёр, личное использование
+slug: singleflight-dedup
+kind: go
+title: "Singleflight: подавление дублирующихся вызовов"
+difficulty: staff
+tags: [concurrency, mutex, waitgroup]
+statement_md: |
+  Реализуйте `Group` с методом `Do`, который подавляет дублирующиеся
+  одновременные вызовы (паттерн singleflight — основа защиты медленного ресурса
+  от «стада» одинаковых запросов, например highload-ручки поверх дорогой
+  функции).
+
+  ```go
+  func NewGroup() *Group
+  func (g *Group) Do(key string, fn func() int) int
+  ```
+
+  - Если несколько горутин одновременно зовут `Do` с **одним** `key`, функция
+    `fn` выполняется **ровно один раз**, а её результат получают все вызывающие.
+  - После завершения вызова запись о ключе удаляется: следующий `Do` с тем же
+    `key` запустит `fn` заново.
+  - Разные ключи независимы и не блокируют друг друга.
+
+  Требования: без гонок и без потерянных результатов (проверяется под `-race`).
+starter_code: |
+  package main
+
+  import "sync"
+
+  // Group подавляет дублирующиеся вызовы: если несколько горутин одновременно
+  // зовут Do с одним key, fn выполняется РОВНО ОДИН раз, а её результат получают
+  // все вызывающие. После завершения запись о ключе удаляется, поэтому следующий
+  // Do с тем же key выполнит fn заново.
+  type Group struct {
+      mu    sync.Mutex
+      calls map[string]*call
+  }
+
+  type call struct {
+      wg  sync.WaitGroup
+      val int
+  }
+
+  func NewGroup() *Group {
+      return &Group{calls: make(map[string]*call)}
+  }
+
+  func (g *Group) Do(key string, fn func() int) int {
+      // TODO: пока без дедупликации — выполняем всегда
+      return fn()
+  }
+hints:
+  - "Под мьютексом смотрите в `map[key]`: если запись о вызове уже есть — этот вызов «в полёте», значит ждём его и берём готовый результат, `fn` НЕ вызываем."
+  - "Если записи нет — вы лидер: создаёте `call` с `wg.Add(1)`, кладёте в мапу, отпускаете мьютекс, вызываете `fn()`, записываете `c.val`, делаете `wg.Done()`. Ожидающие висят на `c.wg.Wait()` и после него читают `c.val`."
+  - "После `wg.Done()` удалите ключ из мапы (снова под мьютексом), чтобы следующий `Do` с этим ключом стартовал заново. `wg.Wait()`→`Done()` даёт happens-before для безопасного чтения `c.val`."
+solution_md: |
+  ### Идея
+
+  Дедупликация «в полёте»: на каждый активный ключ храним запись `call` с
+  `sync.WaitGroup` и полем результата. Первая горутина для ключа — **лидер**:
+  создаёт `call`, регистрирует его в мапе под мьютексом, отпускает мьютекс и
+  выполняет `fn` (единственный раз). Остальные, увидев запись в мапе, не зовут
+  `fn`, а ждут `c.wg.Wait()` и забирают уже готовый `c.val`.
+
+  `wg.Add(1)` делает лидер до отпускания мьютекса; `wg.Done()` — после записи
+  `c.val`. Пара `Wait()`→`Done()` устанавливает happens-before, поэтому чтение
+  `c.val` ожидающими безопасно и без гонок. По завершении лидер удаляет ключ из
+  мапы, чтобы будущие вызовы стартовали заново. Мьютекс защищает только сам
+  реестр `calls`, но не держится во время `fn` — иначе разные ключи мешали бы
+  друг другу.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  type Group struct {
+      mu    sync.Mutex
+      calls map[string]*call
+  }
+
+  type call struct {
+      wg  sync.WaitGroup
+      val int
+  }
+
+  func NewGroup() *Group {
+      return &Group{calls: make(map[string]*call)}
+  }
+
+  func (g *Group) Do(key string, fn func() int) int {
+      g.mu.Lock()
+      if c, ok := g.calls[key]; ok {
+          // уже есть вызов в полёте — ждём его и берём готовый результат
+          g.mu.Unlock()
+          c.wg.Wait()
+          return c.val
+      }
+      c := new(call)
+      c.wg.Add(1)
+      g.calls[key] = c
+      g.mu.Unlock()
+
+      c.val = fn() // единственный исполнитель
+      c.wg.Done()
+
+      g.mu.Lock()
+      delete(g.calls, key)
+      g.mu.Unlock()
+
+      return c.val
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Держать мьютекс во время `fn()` — разные ключи сериализуются, и вообще другие `Do` не смогут даже посмотреть в мапу.
+  - Читать `c.val` без `wg.Wait()` — гонка: значение ещё не записано лидером.
+  - Не удалять ключ после завершения — следующий вызов с тем же ключом вернёт устаревший результат и никогда не выполнит `fn` заново.
+  - `wg.Add(1)` после отпускания мьютекса — ожидающий может проскочить `Wait()` до `Add`.
+time_limit_sec: 20
+race: true
+test_code: |
+  package main
+
+  import (
+      "sync"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestSingleflightDedupsConcurrent(t *testing.T) {
+      g := NewGroup()
+      var executed int32
+
+      const callers = 100
+      results := make([]int, callers)
+      var wg sync.WaitGroup
+      wg.Add(callers)
+      for i := 0; i < callers; i++ {
+          go func(i int) {
+              defer wg.Done()
+              results[i] = g.Do("key", func() int {
+                  atomic.AddInt32(&executed, 1)
+                  time.Sleep(30 * time.Millisecond) // держим вызов «в полёте»
+                  return 777
+              })
+          }(i)
+      }
+      wg.Wait()
+
+      if executed != 1 {
+          t.Fatalf("fn выполнилась %d раз, want 1 (дедупликация не работает)", executed)
+      }
+      for i := 0; i < callers; i++ {
+          if results[i] != 777 {
+              t.Fatalf("caller %d получил %d, want 777", i, results[i])
+          }
+      }
+  }
+
+  func TestSingleflightSeparateKeys(t *testing.T) {
+      g := NewGroup()
+      if v := g.Do("a", func() int { return 1 }); v != 1 {
+          t.Fatalf("ключ a: got %d, want 1", v)
+      }
+      if v := g.Do("b", func() int { return 2 }); v != 2 {
+          t.Fatalf("ключ b: got %d, want 2", v)
+      }
+  }
+
+  func TestSingleflightSequentialReexecutes(t *testing.T) {
+      g := NewGroup()
+      var executed int32
+      fn := func() int {
+          atomic.AddInt32(&executed, 1)
+          return 5
+      }
+      g.Do("k", fn)
+      g.Do("k", fn) // после завершения первого — новый полёт
+      if executed != 2 {
+          t.Fatalf("последовательные Do дали %d выполнений, want 2 (запись не удалена?)", executed)
+      }
+  }

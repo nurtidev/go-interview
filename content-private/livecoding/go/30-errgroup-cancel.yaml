@@ -1,0 +1,194 @@
+# приватный тренажёр, личное использование
+slug: errgroup-cancel
+kind: go
+title: "RunAll: сбор результатов с отменой по первой ошибке"
+difficulty: staff
+tags: [concurrency, context, waitgroup]
+statement_md: |
+  Реализуйте `RunAll` — аналог `errgroup`: запускает задачи параллельно, при
+  первой ошибке отменяет остальные.
+
+  ```go
+  type Task func(ctx context.Context) (int, error)
+
+  func RunAll(ctx context.Context, tasks []Task) ([]int, error)
+  ```
+
+  - Все `tasks` выполняются параллельно, каждой передаётся производный контекст.
+  - Если **все** успешны — вернуть срез результатов (`results[i]` соответствует
+    `tasks[i]`) и `nil`.
+  - Если **любая** вернула ошибку — немедленно отменить производный контекст
+    (чтобы остальные, слушающие `ctx.Done()`, прекратили работу) и вернуть
+    `(nil, перваяОшибка)`.
+
+  Требования:
+
+  - Порядок результатов совпадает с порядком задач.
+  - Возврат — после завершения всех горутин (никаких висящих в фоне).
+  - Без гонок на результатах и на переменной ошибки (проверяется под `-race`).
+starter_code: |
+  package main
+
+  import "context"
+
+  type Task func(ctx context.Context) (int, error)
+
+  // RunAll выполняет все tasks параллельно. Если все успешны — возвращает срез
+  // результатов (results[i] соответствует tasks[i]) и nil. Если хотя бы одна
+  // вернула ошибку — остальные немедленно отменяются через производный контекст,
+  // а RunAll возвращает (nil, перваяОшибка).
+  func RunAll(ctx context.Context, tasks []Task) ([]int, error) {
+      // TODO
+      return nil, nil
+  }
+hints:
+  - "Оберните вход в `ctx, cancel := context.WithCancel(ctx)` и `defer cancel()`. Каждой задаче передавайте этот дочерний `ctx`, чтобы её можно было отменить."
+  - "Результаты пишите по индексу `results[i] = v` (разные индексы — без гонок). Первую ошибку фиксируйте под `sync.Mutex` (только если `firstErr == nil`) и там же зовите `cancel()` — это остановит остальные задачи."
+  - "Дождитесь всех через `sync.WaitGroup`. После `wg.Wait()`: если `firstErr != nil` — верните `(nil, firstErr)`, иначе `(results, nil)`."
+solution_md: |
+  ### Идея
+
+  Это errgroup: параллельный запуск с общей отменой по первой ошибке. Из входного
+  контекста делаем дочерний с `cancel` (`defer cancel()`), и его передаём каждой
+  задаче. Задачи, которые слушают `ctx.Done()`, остановятся, как только кто-то
+  отменит.
+
+  Успешные результаты кладём по индексу `results[i]` — разные ячейки среза,
+  писать их из разных горутин без блокировки безопасно. Ошибку фиксируем под
+  `sync.Mutex`, записывая только первую (`firstErr == nil`), и в тот же момент
+  зовём `cancel()` — это тормозит остальные задачи. Ждём всех через
+  `sync.WaitGroup`, и только потом решаем, что вернуть: при ошибке — `(nil,
+  firstErr)`, иначе — заполненный `results`.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import (
+      "context"
+      "sync"
+  )
+
+  type Task func(ctx context.Context) (int, error)
+
+  func RunAll(ctx context.Context, tasks []Task) ([]int, error) {
+      ctx, cancel := context.WithCancel(ctx)
+      defer cancel()
+
+      results := make([]int, len(tasks))
+      var wg sync.WaitGroup
+      var mu sync.Mutex
+      var firstErr error
+
+      wg.Add(len(tasks))
+      for i, t := range tasks {
+          go func(i int, t Task) {
+              defer wg.Done()
+              v, err := t(ctx)
+              if err != nil {
+                  mu.Lock()
+                  if firstErr == nil {
+                      firstErr = err
+                      cancel() // тормозим остальных по первой ошибке
+                  }
+                  mu.Unlock()
+                  return
+              }
+              results[i] = v // разные индексы — писать без общей блокировки безопасно
+          }(i, t)
+      }
+      wg.Wait()
+
+      if firstErr != nil {
+          return nil, firstErr
+      }
+      return results, nil
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Забыть `defer cancel()` — утечка контекста, а при ошибке остальные задачи не отменяются.
+  - Писать `firstErr` без мьютекса — гонка при нескольких одновременных ошибках (`-race`).
+  - Возвращать результат до `wg.Wait()` — часть задач ещё в работе, `results` неполон, а горутины «висят».
+  - Захватить `i`/`t` замыканием без параметров — на Go ≤ 1.21 запись уйдёт не в ту ячейку и вызовется не та задача.
+time_limit_sec: 20
+race: true
+test_code: |
+  package main
+
+  import (
+      "context"
+      "errors"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestRunAllSuccess(t *testing.T) {
+      tasks := make([]Task, 5)
+      for i := 0; i < 5; i++ {
+          i := i
+          tasks[i] = func(ctx context.Context) (int, error) {
+              return (i + 1) * 10, nil
+          }
+      }
+      got, err := RunAll(context.Background(), tasks)
+      if err != nil {
+          t.Fatalf("неожиданная ошибка: %v", err)
+      }
+      want := []int{10, 20, 30, 40, 50}
+      if len(got) != len(want) {
+          t.Fatalf("получено %v, want %v", got, want)
+      }
+      for i := range want {
+          if got[i] != want[i] {
+              t.Fatalf("got[%d]=%d, want %d (порядок результатов нарушен?)", i, got[i], want[i])
+          }
+      }
+  }
+
+  func TestRunAllReturnsErrorAndCancels(t *testing.T) {
+      boom := errors.New("boom")
+      var canceledSeen int32
+
+      tasks := []Task{
+          func(ctx context.Context) (int, error) {
+              return 0, boom // мгновенная ошибка
+          },
+          func(ctx context.Context) (int, error) {
+              select {
+              case <-ctx.Done():
+                  atomic.AddInt32(&canceledSeen, 1)
+                  return 0, ctx.Err()
+              case <-time.After(2 * time.Second):
+                  return 1, nil
+              }
+          },
+          func(ctx context.Context) (int, error) {
+              select {
+              case <-ctx.Done():
+                  atomic.AddInt32(&canceledSeen, 1)
+                  return 0, ctx.Err()
+              case <-time.After(2 * time.Second):
+                  return 2, nil
+              }
+          },
+      }
+
+      start := time.Now()
+      got, err := RunAll(context.Background(), tasks)
+      if !errors.Is(err, boom) {
+          t.Fatalf("ожидали ошибку boom, получили %v", err)
+      }
+      if got != nil {
+          t.Fatalf("при ошибке результаты должны быть nil, получили %v", got)
+      }
+      if elapsed := time.Since(start); elapsed > 1*time.Second {
+          t.Fatalf("RunAll ждал %v — остальные задачи не отменены по первой ошибке", elapsed)
+      }
+      if atomic.LoadInt32(&canceledSeen) != 2 {
+          t.Fatalf("отмену увидели %d задач из 2", atomic.LoadInt32(&canceledSeen))
+      }
+  }

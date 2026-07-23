@@ -1,0 +1,123 @@
+# приватный тренажёр, личное использование
+slug: iv-library-top-read-authors
+kind: sql
+title: "Библиотека: топ-3 самых читаемых авторов сейчас"
+difficulty: senior
+tags: [join, group-by, aggregation, top-n]
+statement_md: |
+  Та же схема библиотеки: `authors`, `books`, `book_authors`, `readers`,
+  `loans (id, book_id, reader_id, borrowed_at, returned_at)`. Книга сейчас
+  читается, если по ней есть незакрытая выдача (`returned_at IS NULL`).
+  Найдите **топ-3** авторов, чьи книги сейчас на руках у читателей: для
+  каждого автора посчитайте, сколько его книг читается прямо сейчас.
+
+  Верните два столбца: `name` — имя автора и `cnt` — число его книг, что
+  сейчас на руках. Отсортируйте по `cnt` по убыванию, при равенстве — по
+  `name` по возрастанию, и оставьте первые 3 строки.
+starter_code: |
+  -- Верните name и cnt для топ-3 авторов, чьи книги сейчас на руках.
+  SELECT ...
+hints:
+  - "Нужно пройти цепочку authors -> book_authors -> books -> loans и оставить только незакрытые выдачи (returned_at IS NULL)."
+  - "Сгруппируйте по автору (GROUP BY a.id, a.name) и посчитайте COUNT(*) — число его книг на руках."
+  - "Отсортируйте по cnt DESC, name и ограничьте LIMIT 3. У книги не более одной открытой выдачи, поэтому COUNT считает именно число книг, а не выдач."
+solution_md: |
+  ### Идея
+
+  Соединяем всю цепочку: автор → его книги (`book_authors` → `books`) → их
+  выдачи (`loans`), оставляя только незакрытые (`returned_at IS NULL`).
+  Группируем по автору и считаем количество его книг на руках. Так как по
+  книге не может быть двух открытых выдач (частичный уникальный индекс),
+  `COUNT(*)` = число книг автора, что сейчас читаются. Сортируем и берём
+  топ-3.
+
+  ### Эталонный запрос
+
+  ```sql
+  SELECT a.name, COUNT(*) AS cnt
+  FROM authors a
+  JOIN book_authors ba ON ba.author_id = a.id
+  JOIN books b ON b.id = ba.book_id
+  JOIN loans l ON l.book_id = b.id AND l.returned_at IS NULL
+  GROUP BY a.id, a.name
+  ORDER BY cnt DESC, a.name
+  LIMIT 3;
+  ```
+
+  Условие `returned_at IS NULL` можно держать как в `ON`, так и в `WHERE` —
+  при `INNER JOIN` результат одинаков (в отличие от `LEFT JOIN`).
+
+  ### Типичные ошибки на интервью
+
+  - Забыть фильтр `returned_at IS NULL` — посчитаются все выдачи за всю
+    историю, а не «сейчас на руках».
+  - Пропустить `LIMIT 3` или вторичную сортировку по `name` — при равных
+    `cnt` порядок недетерминирован.
+  - Группировать по `name` вместо `a.id` — авторы-однофамильцы склеятся.
+schema_sql: |
+  CREATE TABLE authors (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL
+  );
+  CREATE TABLE books (
+    id    INTEGER PRIMARY KEY,
+    title TEXT NOT NULL
+  );
+  CREATE TABLE book_authors (
+    book_id   INTEGER NOT NULL,
+    author_id INTEGER NOT NULL,
+    PRIMARY KEY (book_id, author_id)
+  );
+  CREATE TABLE readers (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL
+  );
+  CREATE TABLE loans (
+    id          INTEGER PRIMARY KEY,
+    book_id     INTEGER NOT NULL,
+    reader_id   INTEGER NOT NULL,
+    borrowed_at TEXT NOT NULL,
+    returned_at TEXT
+  );
+  CREATE UNIQUE INDEX ux_loans_open_book ON loans (book_id) WHERE returned_at IS NULL;
+seed_sql: |
+  INSERT INTO authors (id, name) VALUES
+    (1, 'Ivanov'),
+    (2, 'Petrova'),
+    (3, 'Sidorov'),
+    (4, 'Kim'),
+    (5, 'Lee'),
+    (6, 'Orlova');
+  INSERT INTO books (id, title) VALUES
+    (1, 'Go in Practice'),
+    (2, 'SQL Deep Dive'),
+    (3, 'Distributed Systems'),
+    (4, 'Linux Kernel'),
+    (5, 'Clean Code'),
+    (6, 'Kubernetes Internals');
+  INSERT INTO book_authors (book_id, author_id) VALUES
+    (1, 1),
+    (2, 2), (2, 3),
+    (3, 1), (3, 2), (3, 4), (3, 5),
+    (4, 6),
+    (5, 1), (5, 2), (5, 3),
+    (6, 1), (6, 2), (6, 3), (6, 6);
+  INSERT INTO readers (id, name) VALUES
+    (1, 'Anna'),
+    (2, 'Boris'),
+    (3, 'Vera');
+  INSERT INTO loans (id, book_id, reader_id, borrowed_at, returned_at) VALUES
+    (1, 1, 1, '2026-06-01', '2026-06-20'),
+    (2, 2, 2, '2026-06-05', '2026-06-25'),
+    (3, 3, 3, '2026-07-01', NULL),
+    (4, 4, 1, '2026-07-05', NULL),
+    (5, 5, 2, '2026-06-10', '2026-07-02'),
+    (6, 6, 3, '2026-07-10', NULL),
+    (7, 1, 2, '2026-07-15', NULL);
+expected:
+  columns: [name, cnt]
+  rows:
+    - ["Ivanov", "3"]
+    - ["Orlova", "2"]
+    - ["Petrova", "2"]
+  order_matters: true

@@ -1,0 +1,196 @@
+# приватный тренажёр, личное использование
+slug: multi-search-first-success
+kind: go
+title: "MultiSearch: первый успешный результат"
+difficulty: senior
+tags: [concurrency, context, channels]
+statement_md: |
+  Реализуйте `MultiSearch`: выполняет один и тот же запрос через несколько
+  источников и возвращает **первый успешный** результат, отменяя остальные.
+
+  ```go
+  type Result struct{ Source string }
+  type SearchFunc func(ctx context.Context, query string) (Result, error)
+
+  func MultiSearch(ctx context.Context, query string, sfs []SearchFunc) (Result, error)
+  ```
+
+  - Все `sfs` запускаются параллельно с одним `query`.
+  - Как только **любой** источник вернул результат без ошибки — немедленно
+    возвращаем его, а остальным сигналим об отмене (через производный контекст).
+  - Если **все** вернули ошибку — возвращаем последнюю полученную ошибку.
+
+  Требования:
+
+  - Проигравшие горутины не должны утекать: они обязаны иметь возможность
+    завершиться даже после того, как `MultiSearch` уже вернулся.
+  - Без гонок (`-race`).
+starter_code: |
+  package main
+
+  import "context"
+
+  type Result struct {
+      Source string
+  }
+
+  type SearchFunc func(ctx context.Context, query string) (Result, error)
+
+  // MultiSearch запускает все sfs параллельно и возвращает ПЕРВЫЙ успешный
+  // результат, немедленно отменяя остальные через производный контекст. Если все
+  // вернули ошибку — возвращает последнюю полученную ошибку.
+  func MultiSearch(ctx context.Context, query string, sfs []SearchFunc) (Result, error) {
+      // TODO
+      return Result{}, nil
+  }
+hints:
+  - "Оберните входной `ctx` в `context.WithCancel` и поставьте `defer cancel()`. Тогда возврат из функции (по первому успеху или по исчерпании) автоматически отменит контекст всех оставшихся источников."
+  - "Заведите канал результатов ёмкости `len(sfs)` (буферизованный!). Каждая горутина шлёт туда `(res, err)`. Буфер важен: проигравшие смогут отправить результат и завершиться даже после того, как мы вернулись, — иначе утечка."
+  - "Читайте из канала в цикле `len(sfs)` раз: при первой `err == nil` сразу `return res, nil` (defer cancel остановит остальных). Иначе запоминайте ошибку в `lastErr`; если все пришли с ошибкой — верните `lastErr`."
+solution_md: |
+  ### Идея
+
+  Классический паттерн «first success». Производим из входного `ctx` дочерний с
+  `cancel` и ставим `defer cancel()` — любой выход из функции (успех или общий
+  провал) отменит контекст, и медленные источники, слушающие `ctx.Done()`,
+  остановятся сами.
+
+  Результаты собираем в **буферизованный** канал ёмкости `len(sfs)`. Буфер —
+  ключевой момент против утечки: после того как мы вернулись по первому успеху,
+  проигравшие горутины всё ещё смогут отправить свой результат (буфера хватает на
+  всех) и спокойно завершиться, не зависнув на отправке.
+
+  Читаем из канала по одному: первая безошибочная выдача — наш ответ; иначе
+  копим `lastErr`. Если все `len(sfs)` пришли с ошибкой — возвращаем последнюю.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "context"
+
+  type Result struct {
+      Source string
+  }
+
+  type SearchFunc func(ctx context.Context, query string) (Result, error)
+
+  func MultiSearch(ctx context.Context, query string, sfs []SearchFunc) (Result, error) {
+      ctx, cancel := context.WithCancel(ctx)
+      defer cancel()
+
+      type outcome struct {
+          res Result
+          err error
+      }
+      ch := make(chan outcome, len(sfs))
+      for _, sf := range sfs {
+          go func(sf SearchFunc) {
+              res, err := sf(ctx, query)
+              ch <- outcome{res, err}
+          }(sf)
+      }
+
+      var lastErr error
+      for i := 0; i < len(sfs); i++ {
+          o := <-ch
+          if o.err == nil {
+              return o.res, nil // defer cancel() остановит остальных
+          }
+          lastErr = o.err
+      }
+      return Result{}, lastErr
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Небуферизованный канал результатов — проигравшие зависают на отправке после нашего возврата (утечка).
+  - Не отменять проигравших — они впустую доработают до конца (при реальных запросах — лишняя нагрузка).
+  - Захватить `sf` замыканием без параметра — на Go ≤ 1.21 все горутины вызовут последний источник.
+  - Возвращать ошибку по первому же провалу — а надо дождаться, вдруг следующий источник успешен.
+time_limit_sec: 18
+race: true
+test_code: |
+  package main
+
+  import (
+      "context"
+      "errors"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestMultiSearchReturnsFirstSuccess(t *testing.T) {
+      slow := func(source string, d time.Duration) SearchFunc {
+          return func(ctx context.Context, q string) (Result, error) {
+              select {
+              case <-time.After(d):
+                  return Result{Source: source}, nil
+              case <-ctx.Done():
+                  return Result{}, ctx.Err()
+              }
+          }
+      }
+      sfs := []SearchFunc{
+          slow("slow", 500*time.Millisecond),
+          slow("fast", 20*time.Millisecond),
+          slow("mid", 200*time.Millisecond),
+      }
+      start := time.Now()
+      res, err := MultiSearch(context.Background(), "q", sfs)
+      if err != nil {
+          t.Fatalf("неожиданная ошибка: %v", err)
+      }
+      if res.Source != "fast" {
+          t.Fatalf("вернулся источник %q, want \"fast\"", res.Source)
+      }
+      if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+          t.Fatalf("ждали %v — не вернулись по первому успеху", elapsed)
+      }
+  }
+
+  func TestMultiSearchCancelsLosers(t *testing.T) {
+      var canceledSeen int32
+      winner := func(ctx context.Context, q string) (Result, error) {
+          return Result{Source: "win"}, nil
+      }
+      loser := func(ctx context.Context, q string) (Result, error) {
+          select {
+          case <-ctx.Done():
+              atomic.AddInt32(&canceledSeen, 1)
+              return Result{}, ctx.Err()
+          case <-time.After(2 * time.Second):
+              return Result{Source: "loser"}, nil
+          }
+      }
+      sfs := []SearchFunc{winner, loser, loser}
+      res, err := MultiSearch(context.Background(), "q", sfs)
+      if err != nil || res.Source != "win" {
+          t.Fatalf("got (%v, %v), want ({win}, nil)", res, err)
+      }
+      ok := false
+      for i := 0; i < 200; i++ {
+          if atomic.LoadInt32(&canceledSeen) == 2 {
+              ok = true
+              break
+          }
+          time.Sleep(10 * time.Millisecond)
+      }
+      if !ok {
+          t.Fatalf("проигравшие не увидели отмену: %d из 2", atomic.LoadInt32(&canceledSeen))
+      }
+  }
+
+  func TestMultiSearchAllFail(t *testing.T) {
+      boom := errors.New("boom")
+      fail := func(ctx context.Context, q string) (Result, error) {
+          return Result{}, boom
+      }
+      _, err := MultiSearch(context.Background(), "q", []SearchFunc{fail, fail, fail})
+      if err == nil {
+          t.Fatal("при всех ошибках должна вернуться ошибка, получили nil")
+      }
+  }

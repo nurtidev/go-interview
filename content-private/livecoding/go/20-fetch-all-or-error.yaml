@@ -1,0 +1,140 @@
+# приватный тренажёр, личное использование
+slug: fetch-all-or-error
+kind: go
+title: "Параллельная загрузка: nil или первая ошибка"
+difficulty: middle
+tags: [concurrency, waitgroup, errors]
+statement_md: |
+  Реализуйте `FetchAll` — запускает набор операций параллельно и ждёт их
+  завершения.
+
+  ```go
+  func FetchAll(fns []func() error) error
+  ```
+
+  Дано: срез функций (каждая имитирует загрузку и возвращает ошибку или `nil`).
+  Выполните все **параллельно**. Если все успешны — верните `nil`; если хотя бы
+  одна вернула ошибку — верните ошибку (первую зафиксированную).
+
+  Требования:
+
+  - Функции выполняются одновременно, а не последовательно.
+  - Возврат только после того, как **все** горутины завершились.
+  - Без гонок при записи общей ошибки (проверяется под `-race`).
+starter_code: |
+  package main
+
+  // FetchAll запускает все fns параллельно и ждёт их завершения. Возвращает nil,
+  // если все успешны; иначе — первую зафиксированную ошибку.
+  func FetchAll(fns []func() error) error {
+      // TODO
+      return nil
+  }
+hints:
+  - "Каждую функцию запускайте в своей горутине, дождитесь всех через `sync.WaitGroup` (`Add(len(fns))`, `defer wg.Done()`, затем `wg.Wait()` перед возвратом)."
+  - "Общую переменную `firstErr` пишут несколько горутин одновременно — защитите её `sync.Mutex`. Под мьютексом присваивайте ошибку, только если `firstErr == nil` (фиксируем первую)."
+  - "Альтернатива мьютексу — буферизованный канал ошибок ёмкости `len(fns)`, куда горутины шлют результат, а после `wg.Wait()` читаете первую ненулевую. Но мьютекс + `firstErr` короче."
+solution_md: |
+  ### Идея
+
+  Это «облегчённый errgroup»: запускаем все функции параллельно и ждём всех.
+  Каждая функция — своя горутина; завершение синхронизируем `sync.WaitGroup`.
+
+  Ошибку фиксируем аккуратно: несколько горутин могут вернуть ошибку
+  одновременно, поэтому запись в общий `firstErr` — под `sync.Mutex`, и только
+  если он ещё `nil` (запоминаем первую). Возврат — строго после `wg.Wait()`,
+  чтобы не пропустить ничью ошибку.
+
+  ### Эталонное решение
+
+  ```go
+  package main
+
+  import "sync"
+
+  func FetchAll(fns []func() error) error {
+      var wg sync.WaitGroup
+      var mu sync.Mutex
+      var firstErr error
+      wg.Add(len(fns))
+      for _, fn := range fns {
+          go func(fn func() error) {
+              defer wg.Done()
+              if err := fn(); err != nil {
+                  mu.Lock()
+                  if firstErr == nil {
+                      firstErr = err
+                  }
+                  mu.Unlock()
+              }
+          }(fn)
+      }
+      wg.Wait()
+      return firstErr
+  }
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Писать `firstErr` без мьютекса — гонка данных при нескольких одновременных ошибках (`-race` поймает).
+  - Захватить `fn` замыканием без передачи параметром — на Go ≤ 1.21 все горутины вызовут последнюю функцию.
+  - Вернуть ошибку по первому же провалу, не дождавшись остальных горутин — они продолжат работать в фоне (при реальных ресурсах — утечка/паника).
+  - Забыть `wg.Wait()` — вернуть `nil`, хотя часть функций ещё не отработала.
+time_limit_sec: 12
+race: true
+test_code: |
+  package main
+
+  import (
+      "errors"
+      "sync/atomic"
+      "testing"
+      "time"
+  )
+
+  func TestFetchAllSuccess(t *testing.T) {
+      var count int32
+      fns := make([]func() error, 5)
+      for i := range fns {
+          fns[i] = func() error {
+              atomic.AddInt32(&count, 1)
+              return nil
+          }
+      }
+      if err := FetchAll(fns); err != nil {
+          t.Fatalf("ожидали nil, получили %v", err)
+      }
+      if count != 5 {
+          t.Fatalf("выполнено %d функций, want 5", count)
+      }
+  }
+
+  func TestFetchAllReturnsError(t *testing.T) {
+      boom := errors.New("boom")
+      fns := []func() error{
+          func() error { return nil },
+          func() error { return boom },
+          func() error { return nil },
+      }
+      if err := FetchAll(fns); err == nil {
+          t.Fatal("ожидали ошибку, получили nil")
+      }
+  }
+
+  func TestFetchAllRunsInParallel(t *testing.T) {
+      const n = 8
+      fns := make([]func() error, n)
+      for i := range fns {
+          fns[i] = func() error {
+              time.Sleep(40 * time.Millisecond)
+              return nil
+          }
+      }
+      start := time.Now()
+      if err := FetchAll(fns); err != nil {
+          t.Fatalf("неожиданная ошибка: %v", err)
+      }
+      if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+          t.Fatalf("выполнялось %v — похоже, последовательно", elapsed)
+      }
+  }

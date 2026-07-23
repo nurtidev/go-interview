@@ -1,0 +1,39 @@
+# приватный тренажёр, Go-квизы, личное использование
+slug: quiz-slice-append-shared-backing
+section: go-internals
+title: "Общий backing array: append перетирает соседний slice"
+difficulty: senior
+tags: [slice, append, aliasing, cap]
+question_md: |
+  Что выведет этот код (или почему)?
+
+  ```go
+  var foo []int
+  var bar []int
+
+  foo = append(foo, 1)
+  foo = append(foo, 2)
+  foo = append(foo, 3)
+  bar = append(foo, 4)
+  foo = append(foo, 5)
+
+  fmt.Println(foo, bar)
+  ```
+answer_levels:
+  - level: middle
+    text_md: |
+      Выведет `[1 2 3 5] [1 2 3 5]`.
+
+      К моменту `bar = append(foo, 4)` у `foo` `len==3`, а `cap==4` (backing вырос с запасом). Поэтому `append` НЕ реаллоцирует: пишет `4` в `foo[3]` того же массива и отдаёт `bar` (`len=4`). Следом `foo = append(foo, 5)` снова видит `cap>len`, пишет `5` в тот же `[3]` — перетирая `4`. `foo` и `bar` смотрят в один массив, поэтому оба показывают `[1 2 3 5]`.
+  - level: senior
+    text_md: |
+      Ключ — история роста `cap`. Пустой `foo`: append 1 -> cap 1, append 2 -> реаллок cap 2, append 3 -> реаллок cap 4. Теперь `len=3, cap=4`, есть свободный слот `[3]`.
+
+      `bar = append(foo, 4)`: запас есть, реаллокации нет — `foo` и `bar` делят backing, `bar` лишь имеет `len=4`. `foo = append(foo, 5)`: снова запас есть, `5` кладётся в тот же индекс `[3]`, что и `4` у `bar`. Обе переменные читают одну ячейку -> у обеих `5`. Оба `len/cap` в этот момент 4/4.
+  - level: deep
+    text_md: |
+      Это классический баг разделяемой подложки, чувствительный к точным числам роста. Если бы `foo` дорос до `cap>4` (или мы бы форсировали реаллокацию), `bar = append(foo, 4)` мог бы выделить новый массив, и связь между `foo` и `bar` разорвалась бы — тогда вывод стал бы `[1 2 3 5] [1 2 3 4]`. То есть результат зависит от неявной ёмкости, которую ещё и округляет `roundupsize` под size-class аллокатора. Чтобы гарантированно отвязать `bar`, берут `bar = append(foo[:len(foo):len(foo)], 4)` (full slice expression форсирует копию) или явный `copy` в новый slice.
+follow_ups:
+  - "Как менялась cap у foo на каждом шаге append и почему на третьем шаге появился запас?"
+  - "Как сделать bar независимым от foo, не полагаясь на реаллокацию?"
+  - "Что выведет код, если между append(3) и append(4) добавить ещё пару элементов?"

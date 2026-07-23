@@ -1,0 +1,100 @@
+# приватный тренажёр, личное использование
+slug: iv-dockerfile-review
+section: platform
+title: "Ревью Dockerfile для Go-сервиса"
+difficulty: middle
+tags: [docker, review]
+question_md: |
+  Найдите проблемы в этом Dockerfile для Go-сервиса и предложите, как их
+  исправить.
+
+  ```dockerfile
+  FROM golang:latest
+  COPY . .
+  RUN go build -o /app
+  CMD ["/app"]
+  ```
+answer_levels:
+  - level: middle
+    text_md: |
+      Базовые проблемы, заметные сразу:
+
+      - **`FROM golang:latest`** — плавающий тег: сборка невоспроизводима,
+        сегодня и через месяц можно получить разные версии Go. Нужен
+        зафиксированный тег, например `golang:1.22`.
+      - **Нет multi-stage build.** Финальный образ содержит весь Go-toolchain,
+        кэш модулей и исходники — сотни мегабайт вместо нескольких. Правильно:
+        собрать бинарник в стадии `builder`, а в рантайм скопировать только
+        его.
+      - **Нет `WORKDIR`.** `COPY . .` копирует в корень `/`, `go build`
+        запускается там же — грязно и легко получить конфликт путей.
+      - **Плохое кэширование слоёв.** `COPY . .` до `go build` означает, что
+        любое изменение исходника инвалидирует слой и заставляет заново качать
+        все зависимости. Сначала копируют `go.mod`/`go.sum` и делают
+        `go mod download`, и только потом копируют остальной код.
+
+      Исправленный минимум:
+
+      ```dockerfile
+      FROM golang:1.22 AS builder
+      WORKDIR /src
+      COPY go.mod go.sum ./
+      RUN go mod download
+      COPY . .
+      RUN CGO_ENABLED=0 go build -o /app ./...
+
+      FROM gcr.io/distroless/static-debian12:nonroot
+      COPY --from=builder /app /app
+      USER nonroot:nonroot
+      ENTRYPOINT ["/app"]
+      ```
+  - level: senior
+    text_md: |
+      Более тонкие вещи, важные для production:
+
+      - **Контейнер запускается от root.** По умолчанию `USER` не задан —
+        процесс работает с uid 0, что расширяет поверхность атаки при
+        компрометации. Нужен непривилегированный пользователь (`USER nonroot`
+        в distroless или явный `adduser`).
+      - **`CGO_ENABLED` не выставлен.** По умолчанию у `golang`-образа cgo
+        включён, бинарник получается динамически слинкованным с glibc и не
+        запустится в `scratch`/`distroless/static`. Для чистого Go нужен
+        `CGO_ENABLED=0` — тогда бинарник статический.
+      - **`CMD` вместо `ENTRYPOINT`.** `CMD` легко перезаписать аргументами
+        `docker run`; для основного процесса-сервиса обычно берут
+        `ENTRYPOINT`, а `CMD` оставляют под аргументы по умолчанию.
+      - **Нет `.dockerignore`.** Без него `COPY . .` тянет в контекст `.git`,
+        локальные бинарники, `node_modules` и т.п. — раздувает контекст и
+        может утечь в образ.
+      - **Флаги линковки.** `-ldflags="-s -w"` убирает таблицу символов и
+        debug-инфо, уменьшая бинарник; полезно указать целевую платформу
+        `GOOS=linux`.
+  - level: deep
+    text_md: |
+      Совсем тонкие моменты, которые отличают senior-ревью:
+
+      - **`GOMAXPROCS`/`GOMEMLIMIT` в контейнере.** До Go 1.25 рантайм не
+        учитывал cgroup CPU-квоту и выставлял `GOMAXPROCS` по числу ядер
+        хоста; при жёстком CFS-лимите это даёт CPU-throttling и рост p99.
+        Решение — `go.uber.org/automaxprocs` (или Go 1.25+, где рантайм
+        cgroup-aware). Аналогично `GOMEMLIMIT` спасает от OOM при близости к
+        `memory.max`.
+      - **TLS-сертификаты в минимальном образе.** `scratch` не содержит
+        `ca-certificates.crt`; если сервис ходит по HTTPS наружу,
+        верификация упадёт. `distroless/static` уже включает корневые
+        сертификаты — ещё одна причина предпочесть его `scratch`.
+      - **Нет `HEALTHCHECK` и явного `EXPOSE`.** Для оркестратора полезно
+        объявить порт и способ проверки живости (хотя в Kubernetes
+        healthcheck обычно задаётся в манифесте, а не в образе).
+      - **Воспроизводимость по-настоящему.** Даже `golang:1.22` — плавающий
+        патч-тег; для полной детерминированности сборки пинят по digest
+        (`golang:1.22@sha256:...`) и фиксируют версии в `go.mod` +
+        `go.sum`.
+      - **Read-only rootfs и drop capabilities** — это уже уровень манифеста
+        оркестратора (`securityContext`), но проектируется вместе с образом:
+        distroless без shell хорошо сочетается с `readOnlyRootFilesystem`.
+follow_ups:
+  - "Чем distroless отличается от alpine и scratch и когда что выбирать?"
+  - "Как собрать один и тот же образ под несколько архитектур (amd64/arm64)?"
+  - "Зачем копировать go.mod/go.sum отдельным слоём до остального кода?"
+  - "Как организовать healthcheck для Go-сервиса без отдельного HTTP-эндпоинта?"

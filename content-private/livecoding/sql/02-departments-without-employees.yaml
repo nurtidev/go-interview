@@ -1,0 +1,91 @@
+# приватный тренажёр, личное использование
+slug: iv-departments-without-employees
+kind: sql
+title: "Отделы без сотрудников"
+difficulty: middle
+tags: [left-join, anti-join, null]
+statement_md: |
+  Есть таблица отделов `departments (department_id, name)` и таблица
+  сотрудников `employees (employee_id, department_id, name)`. Выведите отделы,
+  в которых **нет ни одного сотрудника**.
+
+  Верните два столбца: `department_id` и `name`. Отсортируйте по
+  `department_id` по возрастанию.
+starter_code: |
+  -- Верните department_id и name отделов, в которых нет сотрудников.
+  SELECT ...
+hints:
+  - "Нужны отделы, для которых в employees нет ни одной строки. Это классический анти-join."
+  - "LEFT JOIN от departments к employees по department_id: у пустых отделов все столбцы из employees окажутся NULL."
+  - "Оставьте строки, где ключ сотрудника IS NULL (e.employee_id IS NULL). Эквивалент — NOT EXISTS (SELECT 1 FROM employees e WHERE e.department_id = d.department_id)."
+solution_md: |
+  ### Идея
+
+  Анти-join: ищем строки одной таблицы, у которых нет пары в другой. Делаем
+  `LEFT JOIN` от `departments` к `employees`; у отделов без сотрудников все
+  столбцы из `employees` будут `NULL`, оставляем их условием
+  `e.employee_id IS NULL`.
+
+  ### Эталонный запрос
+
+  ```sql
+  SELECT d.department_id, d.name
+  FROM departments d
+  LEFT JOIN employees e ON e.department_id = d.department_id
+  WHERE e.employee_id IS NULL
+  ORDER BY d.department_id;
+  ```
+
+  Эквивалент через `NOT EXISTS`:
+
+  ```sql
+  SELECT d.department_id, d.name
+  FROM departments d
+  WHERE NOT EXISTS (
+    SELECT 1 FROM employees e WHERE e.department_id = d.department_id
+  )
+  ORDER BY d.department_id;
+  ```
+
+  ### Типичные ошибки на интервью
+
+  - Проверять `= NULL` вместо `IS NULL` — условие всегда ложно.
+  - Ставить фильтр в `ON` вместо `WHERE` — при LEFT JOIN это меняет смысл и
+    вернёт все отделы.
+  - `NOT IN (SELECT department_id FROM employees)` опасен: если в подзапросе
+    окажется `NULL`, результат станет пустым (ловушка трёхзначной логики).
+schema_sql: |
+  CREATE TABLE departments (
+    department_id INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL
+  );
+  CREATE TABLE employees (
+    employee_id   INTEGER PRIMARY KEY,
+    department_id INTEGER NOT NULL,
+    name          TEXT NOT NULL
+  );
+seed_sql: |
+  INSERT INTO departments (department_id, name) VALUES
+    (1, 'Engineering'),
+    (2, 'Sales'),
+    (3, 'Marketing'),
+    (4, 'Support'),
+    (5, 'Research'),
+    (6, 'Legal');
+  INSERT INTO employees (employee_id, department_id, name) VALUES
+    (1, 1, 'Alice'),
+    (2, 1, 'Bob'),
+    (3, 1, 'Carol'),
+    (4, 2, 'Dave'),
+    (5, 2, 'Eve'),
+    (6, 4, 'Frank'),
+    (7, 4, 'Grace'),
+    (8, 4, 'Heidi'),
+    (9, 1, 'Ivan');
+expected:
+  columns: [department_id, name]
+  rows:
+    - ["3", "Marketing"]
+    - ["5", "Research"]
+    - ["6", "Legal"]
+  order_matters: true

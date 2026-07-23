@@ -1,0 +1,43 @@
+# приватный тренажёр, Go-квизы, личное использование
+slug: quiz-nil-map-assignment-panic
+section: go-internals
+title: "Запись в nil-map: паника"
+difficulty: middle
+tags: [map, nil, panic]
+question_md: |
+  Что выведет этот код (или почему)?
+
+  ```go
+  func main() {
+    var m map[string]int
+    for _, word := range []string{"hello", "world", "from", "the",
+      "best", "language", "in", "the", "world"} {
+      m[word]++
+    }
+    for k, v := range m {
+      fmt.Println(k, v)
+    }
+  }
+  ```
+answer_levels:
+  - level: middle
+    text_md: |
+      Ничего не выведет — код упадёт с паникой на первой же итерации:
+
+      ```
+      panic: assignment to entry in nil map
+      ```
+
+      `var m map[string]int` даёт `nil`-map (объявлена, но не создана). Читать из nil-map можно (вернёт нулевое значение), а вот ПИСАТЬ (`m[word]++` — это чтение+запись) — нельзя. Нужно `m := make(map[string]int)` или `m := map[string]int{}`.
+  - level: senior
+    text_md: |
+      Map в Go — указатель на `runtime.hmap`. У nil-map этот указатель нулевой. Чтение (`v := m[k]`, `range`) рантайм обрабатывает специально: для nil-map возвращает zero value и ноль итераций, не разыменовывая `hmap`. А запись идёт через `runtime.mapassign`, которая для nil-map немедленно вызывает `panic("assignment to entry in nil map")` — выделять backing на месте она не может, потому что у неё копия указателя, и созданный `hmap` не был бы виден снаружи.
+
+      `m[word]++` — это `m[word] = m[word] + 1`, то есть присваивание -> паника.
+  - level: deep
+    text_md: |
+      Асимметрия «читать из nil-map можно, писать нельзя» — намеренная: она позволяет использовать nil-map как пустую read-only map без лишних проверок (частый приём для optional-полей). Контраст со slice: в nil-slice тоже нельзя писать по индексу, но `append(nilSlice, x)` РАБОТАЕТ, потому что append возвращает новый slice, а map-запись мутирует на месте и вернуть новый header не может. Отсюда и разница в API. Ещё нюанс: `delete(nilMap, k)` — безопасен (no-op), тоже не паникует.
+follow_ups:
+  - "Почему из nil-map читать можно, а писать нельзя?"
+  - "Чем отличается поведение nil-map от nil-slice при добавлении элемента?"
+  - "Паникует ли delete(m, k) на nil-map?"
